@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  franka-rl:
+    build: .
+    container_name: franka_ros2_rl
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - .:/ros2_rl_ws
+    stdin_open: true
+    tty: true
+    # I include NVIDIA support for Gazebo performance
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
