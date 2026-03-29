@@ -11,35 +11,35 @@ I use the following stack for stability on Jammy Jellyfish:
 
 ---
 
-## 2. Environment Installation
-I install the necessary packages to bridge the simulation and control layers.
+## 2. Docker Setup
+I use a Docker container for a reproducible environment that includes all dependencies.
 
 ```bash
-# Update and install ROS 2 Humble
-sudo apt update && sudo apt install ros-humble-desktop -y
+# Set up X11 for the Gazebo GUI
+xhost +local:docker
 
-# Install Gazebo Fortress and ROS-GZ Bridge
-sudo apt install ros-humble-ros-gz -y
+# Build and start the container
+docker compose build
+docker compose up -d
 
-# Install ros2_control and Franka description
-sudo apt install ros-humble-ros2-control \
-                 ros-humble-ros2-controllers \
-                 ros-humble-franka-description -y
-
-# Install RL dependencies
-pip install gymnasium stable-baselines3 shimmy
+# Enter the container environment
+docker exec -it franka_ros2_rl bash
 ```
 
 ---
 
 ## 3. Workspace Setup
-I create a workspace and clone the necessary simulation logic.
+I use the Franka ROS 2 workspace to control the Panda manipulator.
 
 ```bash
-mkdir -p ~/ros2_rl_ws/src
-cd ~/ros2_rl_ws/src
-# Clone a compatible panda_gazebo package if not using the built-in description
-# For this guide, I assume you have a URDF configured for ros2_control and gz_ros2_control.
+cd /ros2_rl_ws/src
+# Clone the official Franka ROS 2 workspace
+git clone https://github.com/frankarobotics/franka_ros2.git
+
+# Install dependencies and build
+cd /ros2_rl_ws
+rosdep update && rosdep install --from-paths src --ignore-src -y
+colcon build --symlink-install
 ```
 
 ### The `ros_gz_bridge` Configuration
