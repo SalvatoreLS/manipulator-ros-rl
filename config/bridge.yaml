@@ -5,33 +5,3 @@
   ros_type_name: 'sensor_msgs/msg/JointState'
   gz_type_name: 'gz.msgs.Model'
   direction: GZ_TO_ROS # Gazebo -> ROS 2
-- ros_topic_name: '/forward_position_controller/commands'
-  gz_topic_name: '/world/default/model/fr3/joint_position_cmd'
-  ros_type_name: 'ros_gz_interfaces/msg/Float32Array'
-  gz_type_name: 'gz.msgs.Float_V'
-  direction: ROS_TO_GZ # ROS 2 -> Gazebo
-#
-# Command topics can vary by Gazebo world/model naming (world defaults to `default`
-# in some setups; `empty` in others; the model might be called `fr3` or `panda`).
-# We bridge to multiple likely Gazebo command topics so one will match the running sim.
-#
-- ros_topic_name: '/forward_position_controller/commands'
-  gz_topic_name: '/world/empty/model/fr3/joint_position_cmd'
-  ros_type_name: 'ros_gz_interfaces/msg/Float32Array'
-  gz_type_name: 'gz.msgs.Float_V'
-  direction: ROS_TO_GZ # ROS 2 -> Gazebo
-- ros_topic_name: '/forward_position_controller/commands'
-  gz_topic_name: '/world/empty_no_gravity/model/fr3/joint_position_cmd'
-  ros_type_name: 'ros_gz_interfaces/msg/Float32Array'
-  gz_type_name: 'gz.msgs.Float_V'
-  direction: ROS_TO_GZ # ROS 2 -> Gazebo
-- ros_topic_name: '/forward_position_controller/commands'
-  gz_topic_name: '/world/default/model/panda/joint_position_cmd'
-  ros_type_name: 'ros_gz_interfaces/msg/Float32Array'
-  gz_type_name: 'gz.msgs.Float_V'
-  direction: ROS_TO_GZ # ROS 2 -> Gazebo
-- ros_topic_name: '/forward_position_controller/commands'
-  gz_topic_name: '/world/empty/model/panda/joint_position_cmd'
-  ros_type_name: 'ros_gz_interfaces/msg/Float32Array'
-  gz_type_name: 'gz.msgs.Float_V'
-  direction: ROS_TO_GZ # ROS 2 -> Gazebo

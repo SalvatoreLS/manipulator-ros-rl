@@ -42,7 +42,9 @@ RUN pip3 install \
     gymnasium \
     stable-baselines3 \
     shimmy \
-    tensorboard
+    tensorboard \
+    keyboard \
+    pynput
 
 WORKDIR /ros2_rl_ws
 
