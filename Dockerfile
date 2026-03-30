@@ -1,30 +1,53 @@
 FROM osrf/ros:humble-desktop-full
 
-# I install Gazebo Fortress and Franka dependencies
+# Install Gazebo/Franka and build dependencies
 RUN apt-get update && apt-get install -y \
     ros-humble-ros-gz \
     ros-humble-ros2-control \
     ros-humble-ros2-controllers \
     ros-humble-franka-description \
+    ros-humble-pinocchio \
+    libpoco-dev \
+    python3-vcstool \
     python3-pip \
+    ros-humble-ament-cmake-clang-format \
+    ros-humble-ament-cmake-clang-tidy \
+    ros-humble-moveit \
+    ros-humble-moveit-core \
+    ros-humble-moveit-ros-planning \
+    ros-humble-moveit-ros-planning-interface \
+    ros-humble-moveit-kinematics \
+    ros-humble-moveit-planners-ompl \
+    ros-humble-moveit-ros-move-group \
+    ros-humble-moveit-ros-visualization \
+    ros-humble-gz-ros2-control \
+    ros-humble-controller-manager \
+    ros-humble-moveit-msgs \
+    ros-humble-moveit-core \
+    ros-humble-moveit-ros-planning \
+    ros-humble-moveit-ros-planning-interface \
+    ros-humble-moveit-ros-move-group \
+    ros-humble-moveit-core \
+    ros-humble-moveit-ros-planning \
+    ros-humble-moveit-ros-planning-interface \
+    ros-humble-moveit-kinematics \
+    ros-humble-moveit-planners-ompl \
+    ros-humble-moveit-simple-controller-manager \
+    ros-humble-moveit-ros-visualization \
+    ros-humble-joint-trajectory-controller \
     && rm -rf /var/lib/apt/lists/*
 
-# I install the RL stack
+# Install RL Python stack
 RUN pip3 install \
     gymnasium \
     stable-baselines3 \
     shimmy \
     tensorboard
 
-# I set up the workspace directory
 WORKDIR /ros2_rl_ws
 
-# I copy the entrypoint script into the container
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# I set the entrypoint
 ENTRYPOINT ["/entrypoint.sh"]
-
-# I default to bash if no command is provided
 CMD ["bash"]

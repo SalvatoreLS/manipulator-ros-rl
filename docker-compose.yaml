@@ -9,11 +9,10 @@ services:
       - DISPLAY=${DISPLAY}
       - QT_X11_NO_MITSHM=1
     volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - .:/ros2_rl_ws
     stdin_open: true
     tty: true
-    # I include NVIDIA support for Gazebo performance
     deploy:
       resources:
         reservations:
