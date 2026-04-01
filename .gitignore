@@ -79,6 +79,7 @@ DOCKER.md
 *.swp
 .tmp/
 VISUALIZATION.md
+DISTANCE_BASED.md
 
 # Build outputs
 *.o
