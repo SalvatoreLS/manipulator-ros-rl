@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'rl_training'
+package_name = 'distance_based_rl'
 
 setup(
     name=package_name,
@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='losardosalvatorejr@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Package for training a reinforcement learning agent using distance-based rewards in a simulated ROS2 environment.',
+    license='Apache 2.0',
     extras_require={
         'test': [
             'pytest',

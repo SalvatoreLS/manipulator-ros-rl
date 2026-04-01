@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>distance_based_rl</name>
+  <version>0.0.0</version>
+  <description>
+    This package contains the necessary files to interact with the simulated ROS2 environment and train a reinforcement learning agent.
+    The folder structure is organized as follows:
+    - `distance_based_rl/agent/`: Contains agent implementation, training scripts and utilities for saving, loading, and evaluating the agent.
+    - `distance_based_rl/env/`: Contains the ROS2 environment implementation, including the reward function based on distance to the goal, and the necessary ROS2 nodes for interaction.
+  </description>
+  <maintainer email="losardosalvatorejr@gmail.com">root</maintainer>
+  <license>Apache 2.0</license>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <exec_depend>gym</exec_depend>
+  <exec_depend>numpy</exec_depend>
+  <exec_depend>python3</exec_depend>
+  <exec_depend>torch</exec_depend>
+
+  <depend>rclpy</depend> 
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

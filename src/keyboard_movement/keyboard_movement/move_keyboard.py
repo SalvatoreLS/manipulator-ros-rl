@@ -239,8 +239,7 @@ def main(args=None):
     except KeyboardInterrupt:
         controller.get_logger().info('Shutting down…')
     finally:
-        if controller.listener:
-            controller.listener.stop()
+        if controller.listener: controller.listener.stop()
         controller.destroy_node()
         rclpy.shutdown()
 

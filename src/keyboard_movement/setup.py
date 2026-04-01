@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'manipulator_movement'
+package_name = 'keyboard_movement'
 
 setup(
     name=package_name,
@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='salvatore',
     maintainer_email='losardosalvatorejr@gmail.com',
-    description='TODO: Package description',
+    description='This ROS2 package handles the movement of the robotic manipulator through keyboard inputs.',
     license='Apache License 2.0',
     extras_require={
         'test': [
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'move_keyboard = manipulator_movement.move_keyboard:main',
+            'move_keyboard = keyboard_movement.move_keyboard:main',
         ],
     },
 )

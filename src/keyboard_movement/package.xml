@@ -1,11 +1,17 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>manipulator_movement</name>
+  <name>keyboard_movement</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>
+    This ROS2 package handles the movement of the robotic manipulator through keyboard inputs.
+    It provides a node that listens for specific key presses and translates them into movement commands for the manipulator.
+    
+    Topics:
+      - [PUB] /forward_position_controller/commands: send velocity commands to the manipulator's joints.
+  </description>
   <maintainer email="losardosalvatorejr@gmail.com">root</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache License 2.0</license>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
