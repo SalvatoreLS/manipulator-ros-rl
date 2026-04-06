@@ -18,12 +18,11 @@ class RandomTargetServer(Node):
             msg.y = random.uniform(-1.0, 1.0)
             msg.z = random.uniform(0.0, 1.0)
             self.publisher_.publish(msg)
-            self.get_logger().info(f'Published new random target: {msg}')
+            self.get_logger().info(f'Published new random target: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f})')
             response.success = True
-            response.message = 'Random target published successfully'
         except Exception as e:
+            self.get_logger().error(f'Error generating random target: {str(e)}')
             response.success = False
-            response.message = f'Error: {str(e)}'
         return response
 
 def main(args=None):

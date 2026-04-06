@@ -1,17 +1,19 @@
-"""
-Definition of the Soft Actor-Critic (SAC) agent for distance-based reinforcement learning in a simulated ROS2 environment.
-"""
+"""Define the Soft Actor-Critic (SAC) agent for distance-based RL."""
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
+import random
+import os
+import json
 
 # TODO: check correctness of these classes
 
 class FCGP(nn.Module):
     """Fully Connected Gaussian Policy Network."""
+
     def __init__(self, state_dim, action_dim, hidden_dim=256):
         super(FCGP, self).__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
@@ -29,6 +31,7 @@ class FCGP(nn.Module):
 
 class ReplayBuffer:
     """Simple replay buffer for storing transitions."""
+
     def __init__(self, capacity):
         self.capacity = capacity
         self.buffer = []
@@ -51,6 +54,10 @@ class ReplayBuffer:
 
 class SACAgent:
     def __init__(self, state_dim, action_dim, hidden_dim=256, lr=3e-4, buffer_size=1000):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.lr = lr
         self.policy = FCGP(state_dim, action_dim, hidden_dim)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.replay_buffer = ReplayBuffer(buffer_size)
@@ -84,3 +91,35 @@ class SACAgent:
         loss.backward()
         self.optimizer.step()
         self.optimizer.zero_grad()
+
+    def save_model(self, path):
+        """Save agent model and hyperparameters to disk."""
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        
+        checkpoint = {
+            'policy_state_dict': self.policy.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'state_dim': self.state_dim,
+            'action_dim': self.action_dim,
+            'hidden_dim': self.hidden_dim,
+            'lr': self.lr,
+            'buffer_size': self.buffer_size,
+        }
+        torch.save(checkpoint, path)
+        print(f"Model saved to {path}")
+
+    def load_model(self, path):
+        """Load agent model and hyperparameters from disk."""
+        checkpoint = torch.load(path)
+        
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        print(f"Model loaded from {path}")
+        print(f"Loaded model: state_dim={checkpoint['state_dim']}, "
+              f"action_dim={checkpoint['action_dim']}, "
+              f"hidden_dim={checkpoint['hidden_dim']}")
+
+    def get_buffer_size(self):
+        """Return current size of replay buffer."""
+        return len(self.replay_buffer)

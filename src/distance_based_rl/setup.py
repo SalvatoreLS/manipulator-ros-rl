@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'random_target_server = distance_based_rl.scripts.random_target_server:main',
+            'train_agent = distance_based_rl.agent.train:main',
         ],
     },
 )
