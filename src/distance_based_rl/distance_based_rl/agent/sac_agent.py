@@ -1,5 +1,6 @@
 """Define the Soft Actor-Critic (SAC) agent for distance-based RL."""
 
+import copy
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -7,15 +8,14 @@ import torch.optim as optim
 import numpy as np
 import random
 import os
-import json
 
-# TODO: check correctness of these classes
-
-class FCGP(nn.Module):
-    """Fully Connected Gaussian Policy Network."""
-
+class GaussianPolicy(nn.Module):
+    """
+    Class defining the Gaussian policy network for the SAC agent.
+    It outputs both the mean and log standard deviation of the action distribution.
+    """
     def __init__(self, state_dim, action_dim, hidden_dim=256):
-        super(FCGP, self).__init__()
+        super(GaussianPolicy, self).__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.mean_layer = nn.Linear(hidden_dim, action_dim)
@@ -25,9 +25,41 @@ class FCGP(nn.Module):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
         mean = self.mean_layer(x)
-        log_std = self.log_std_layer(x).clamp(-20, 2)  # Clamp log_std for numerical stability
+        log_std = self.log_std_layer(x).clamp(-20, 2)
         return mean, log_std
-    
+
+    def sample(self, state):
+        """Sample an action from the policy given a state."""
+        mean, log_std = self.forward(state)
+        std = log_std.exp()
+        normal = torch.distributions.Normal(mean, std)
+        
+        z = normal.rsample()
+        action = torch.tanh(z)
+        
+        log_prob = normal.log_prob(z) - torch.log(1 - action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(1, keepdim=True)
+        
+        return action, log_prob
+
+class QNetwork(nn.Module):
+    """
+    Class defining the Q-network for the SAC agent.
+    It takes both state and action as input and outputs a single Q-value.
+    It is the critic network used to estimate the value of state-action pairs,
+    and is trained to minimize the Bellman error.
+    """
+    def __init__(self, state_dim, action_dim, hidden_dim=256):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_dim + action_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, 1)
+
+    def forward(self, state, action):
+        x = torch.cat([state, action], 1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
 
 class ReplayBuffer:
     """Simple replay buffer for storing transitions."""
@@ -37,89 +69,198 @@ class ReplayBuffer:
         self.buffer = []
         self.position = 0
 
-    def push(self, state, action, reward, next_state, done):
+    @staticmethod
+    def _to_vector(state):
+        if hasattr(state, 'as_vector') and callable(state.as_vector):
+            return np.asarray(state.as_vector(), dtype=np.float32).reshape(-1)
+        return np.asarray(state, dtype=np.float32).reshape(-1)
+
+    def push(self, state, action=None, reward=None, next_state=None, done=None):
+        if action is None and hasattr(state, 'as_replay_tuple') and callable(state.as_replay_tuple):
+            state, action, reward, next_state, done = state.as_replay_tuple()
+
+        state_vec = self._to_vector(state)
+        next_state_vec = self._to_vector(next_state)
+        action_vec = np.asarray(action, dtype=np.float32).reshape(-1)
+        reward_val = float(reward)
+        done_val = bool(done)
+
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = (state, action, reward, next_state, done)
+        self.buffer[self.position] = (state_vec, action_vec, reward_val, next_state_vec, done_val)
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size):
+        if len(self.buffer) < batch_size:
+            raise ValueError(
+                f"Not enough samples in replay buffer: requested {batch_size}, available {len(self.buffer)}"
+            )
         batch = random.sample(self.buffer, batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(dones)
+        return (
+            np.asarray(states, dtype=np.float32),
+            np.asarray(actions, dtype=np.float32),
+            np.asarray(rewards, dtype=np.float32),
+            np.asarray(next_states, dtype=np.float32),
+            np.asarray(dones, dtype=np.float32),
+        )
 
     def __len__(self):
         return len(self.buffer)
 
-
 class SACAgent:
-    def __init__(self, state_dim, action_dim, hidden_dim=256, lr=3e-4, buffer_size=1000):
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
-        self.lr = lr
-        self.policy = FCGP(state_dim, action_dim, hidden_dim)
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+    """
+    Class defining the Soft Actor-Critic (SAC) agent for distance-based reinforcement learning.
+    It includes the policy network, two Q-networks, target networks, and optimizers for each component.
+    """
+    def __init__(
+        self,
+        state_dim,
+        action_dim,
+        hidden_dim=256,
+        lr=3e-4,
+        gamma=0.99,
+        tau=0.005,
+        alpha=0.2,
+        buffer_size=10000,
+    ):
+        self.state_dim = int(state_dim)
+        self.action_dim = int(action_dim)
+        self.gamma = gamma
+        self.tau = tau
+        self.alpha = alpha
         self.replay_buffer = ReplayBuffer(buffer_size)
-        self.buffer_size = buffer_size
+        
+        self.policy = GaussianPolicy(state_dim, action_dim, hidden_dim)
+        self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=lr)
 
-    def select_action(self, state):
-        state = torch.FloatTensor(state).unsqueeze(0)
-        mean, log_std = self.policy(state)
-        std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
-        z = normal.rsample()  # Reparameterization trick
-        action = torch.tanh(z)  # Squash action to [-1, 1]
-        return action.detach().cpu().numpy()[0]
+        self.critic1 = QNetwork(state_dim, action_dim, hidden_dim)
+        self.critic2 = QNetwork(state_dim, action_dim, hidden_dim)
+        self.critic1_target = copy.deepcopy(self.critic1)
+        self.critic2_target = copy.deepcopy(self.critic2)
+        
+        self.critic_optimizer = optim.Adam(
+            list(self.critic1.parameters()) + list(self.critic2.parameters()), 
+            lr=lr
+        )
+
+        self.target_entropy = -action_dim
+        self.log_alpha = torch.zeros(1, requires_grad=True)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=lr)
+        self.optimizer = self.policy_optimizer
+
+    def _state_to_vector(self, state):
+        if hasattr(state, 'as_vector') and callable(state.as_vector):
+            state_vec = np.asarray(state.as_vector(), dtype=np.float32)
+        else:
+            state_vec = np.asarray(state, dtype=np.float32)
+        return state_vec.reshape(-1)
+
+    def select_action(self, state, evaluate=False):
+        state = torch.FloatTensor(self._state_to_vector(state)).unsqueeze(0)
+        if evaluate:
+            mean, _ = self.policy(state)
+            action = torch.tanh(mean)
+        else:
+            action, _ = self.policy.sample(state)
+        return action.detach().cpu().numpy()[0].astype(np.float32)
 
     def optimize(self, batch_size=256):
-        # Sample a batch of transitions from the replay buffer
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size)
 
-        # Convert to tensors
         states = torch.FloatTensor(states)
         actions = torch.FloatTensor(actions)
         rewards = torch.FloatTensor(rewards).unsqueeze(1)
         next_states = torch.FloatTensor(next_states)
         dones = torch.FloatTensor(dones).unsqueeze(1)
 
-        # Compute target Q-values and update the policy network
-        q_values = self.policy(states)[0]  # Get mean action from policy
-        target_q_values = rewards + (1 - dones) * 0.99 * self.policy(next_states)[0].max(1, keepdim=True)[0]  # Compute target Q-values
-        loss = F.mse_loss(q_values, target_q_values.detach())  # Compute MSE loss between current Q-values and target Q-values
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+        with torch.no_grad():
+            next_actions, next_log_probs = self.policy.sample(next_states)
+            q1_next = self.critic1_target(next_states, next_actions)
+            q2_next = self.critic2_target(next_states, next_actions)
+            min_q_next = torch.min(q1_next, q2_next) - self.alpha * next_log_probs
+            target_q = rewards + (1 - dones) * self.gamma * min_q_next
 
-    def save_model(self, path):
-        """Save agent model and hyperparameters to disk."""
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        # Critic update
+        q1 = self.critic1(states, actions)
+        q2 = self.critic2(states, actions)
+        critic_loss = F.mse_loss(q1, target_q) + F.mse_loss(q2, target_q)
         
-        checkpoint = {
-            'policy_state_dict': self.policy.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'state_dim': self.state_dim,
-            'action_dim': self.action_dim,
-            'hidden_dim': self.hidden_dim,
-            'lr': self.lr,
-            'buffer_size': self.buffer_size,
-        }
-        torch.save(checkpoint, path)
-        print(f"Model saved to {path}")
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
 
-    def load_model(self, path):
-        """Load agent model and hyperparameters from disk."""
-        checkpoint = torch.load(path)
+        # Policy update
+        new_actions, log_probs = self.policy.sample(states)
+        q1_new = self.critic1(states, new_actions)
+        q2_new = self.critic2(states, new_actions)
+        min_q_new = torch.min(q1_new, q2_new)
         
-        self.policy.load_state_dict(checkpoint['policy_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        print(f"Model loaded from {path}")
-        print(f"Loaded model: state_dim={checkpoint['state_dim']}, "
-              f"action_dim={checkpoint['action_dim']}, "
-              f"hidden_dim={checkpoint['hidden_dim']}")
+        policy_loss = (self.alpha * log_probs - min_q_new).mean()
+
+        self.policy_optimizer.zero_grad()
+        policy_loss.backward()
+        self.policy_optimizer.step()
+
+        # Temperature update
+        alpha_loss = -(self.log_alpha * (log_probs + self.target_entropy).detach()).mean()
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+        self.alpha = float(self.log_alpha.exp().detach().item())
+
+        self._soft_update_targets()
+
+    def _soft_update_targets(self):
+        """Helper function to perform soft updates of the target networks."""
+        for param, target_param in zip(self.critic1.parameters(), self.critic1_target.parameters()):
+            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+        for param, target_param in zip(self.critic2.parameters(), self.critic2_target.parameters()):
+            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+
+    def save_model(self, model_path):
+        """Save model checkpoints and optimizer states."""
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+        torch.save(
+            {
+                'policy': self.policy.state_dict(),
+                'critic1': self.critic1.state_dict(),
+                'critic2': self.critic2.state_dict(),
+                'critic1_target': self.critic1_target.state_dict(),
+                'critic2_target': self.critic2_target.state_dict(),
+                'policy_optimizer': self.policy_optimizer.state_dict(),
+                'critic_optimizer': self.critic_optimizer.state_dict(),
+                'alpha_optimizer': self.alpha_optimizer.state_dict(),
+                'log_alpha': self.log_alpha.detach().cpu(),
+                'alpha': self.alpha,
+            },
+            model_path,
+        )
+
+    def load_model(self, model_path):
+        """Load model checkpoints and optimizer states when available."""
+        checkpoint = torch.load(model_path, map_location='cpu')
+        self.policy.load_state_dict(checkpoint['policy'])
+        self.critic1.load_state_dict(checkpoint['critic1'])
+        self.critic2.load_state_dict(checkpoint['critic2'])
+        self.critic1_target.load_state_dict(checkpoint['critic1_target'])
+        self.critic2_target.load_state_dict(checkpoint['critic2_target'])
+
+        if 'policy_optimizer' in checkpoint:
+            self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer'])
+        if 'critic_optimizer' in checkpoint:
+            self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
+        if 'alpha_optimizer' in checkpoint:
+            self.alpha_optimizer.load_state_dict(checkpoint['alpha_optimizer'])
+        if 'log_alpha' in checkpoint:
+            self.log_alpha = checkpoint['log_alpha'].clone().detach().requires_grad_(True)
+            self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.alpha_optimizer.param_groups[0]['lr'])
+        self.alpha = float(checkpoint.get('alpha', self.log_alpha.exp().detach().item()))
 
     def get_buffer_size(self):
-        """Return current size of replay buffer."""
+        """Return the number of stored transitions in replay buffer."""
         return len(self.replay_buffer)
+
+
+# Backward-compatible alias expected by tests.
+FCGP = GaussianPolicy

@@ -6,6 +6,7 @@ import os
 import sys
 from datetime import datetime
 
+# Check for torch and gym dependencies
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_AVAILABLE = True
@@ -24,10 +25,10 @@ except ImportError:
 
 # Handle imports for both direct execution and module import
 try:
-    from distance_based_rl.env.arm_env import ManipulatorEnv
+    from distance_based_rl.environment.arm_env import ManipulatorEnv, State, StateActionReward
     from distance_based_rl.agent.sac_agent import SACAgent
 except ImportError:
-    from arm_env import ManipulatorEnv
+    from arm_env import ManipulatorEnv, State, StateActionReward
     from sac_agent import SACAgent
 
 
@@ -89,18 +90,31 @@ def train(config=None):
 
     try:
         for episode in range(config.num_episodes):
-            state, _ = env.reset()  # New random target position
+            state, info = env.reset()  # [ROS] New random target position in ROS2 environment
+            state_obj = info.get('state')
             done = False
             total_reward = 0
             steps = 0
 
             while not done and steps < config.max_steps_per_episode:
                 # Select and execute action
-                action = agent.select_action(state)
-                next_state, reward, terminated, truncated, _ = env.step(action)
+                action = agent.select_action(state_obj if state_obj is not None else state)
+                next_state, reward, terminated, truncated, step_info = env.step(action) # [ROS] Step in ROS2 environment
+                next_state_obj = step_info.get('state')
+                done = terminated or truncated
 
                 # Store transition in replay buffer
-                agent.replay_buffer.push(state, action, reward, next_state, done)
+                if state_obj is not None and next_state_obj is not None:
+                    transition = StateActionReward(
+                        state=state_obj,
+                        action=action,
+                        reward=reward,
+                        next_state=next_state_obj,
+                        done=done,
+                    )
+                    agent.replay_buffer.push(transition)
+                else:
+                    agent.replay_buffer.push(state, action, reward, next_state, done)
 
                 # Optimize if buffer has enough samples
                 if len(agent.replay_buffer) >= config.batch_size:
@@ -108,7 +122,7 @@ def train(config=None):
 
                 total_reward += reward
                 state = next_state
-                done = terminated or truncated
+                state_obj = next_state_obj
                 steps += 1
 
             # Track episode metrics
@@ -213,7 +227,7 @@ def main():
     # Optionally load model for evaluation
     if args.load_model:
         print(f"\nLoading model from {args.load_model}...")
-        agent = SACAgent(state_dim=6, action_dim=7)  # Adjust dimensions as needed
+        agent = SACAgent(state_dim=State.vector_dim(), action_dim=7)
         agent.load_model(args.load_model)
         print("Model loaded successfully")
 
