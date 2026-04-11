@@ -123,6 +123,7 @@ class SACAgent:
         tau=0.005,
         alpha=0.2,
         buffer_size=10000,
+        device=None,
     ):
         self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
@@ -130,22 +131,30 @@ class SACAgent:
         self.tau = tau
         self.alpha = alpha
         self.replay_buffer = ReplayBuffer(buffer_size)
-        
-        self.policy = GaussianPolicy(state_dim, action_dim, hidden_dim)
+
+        # Resolve device: honour explicit argument, then check CUDA availability.
+        if device is not None:
+            self.device = torch.device(device)
+        elif torch.cuda.is_available():
+            self.device = torch.device('cuda')
+        else:
+            self.device = torch.device('cpu')
+
+        self.policy = GaussianPolicy(state_dim, action_dim, hidden_dim).to(self.device)
         self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=lr)
 
-        self.critic1 = QNetwork(state_dim, action_dim, hidden_dim)
-        self.critic2 = QNetwork(state_dim, action_dim, hidden_dim)
+        self.critic1 = QNetwork(state_dim, action_dim, hidden_dim).to(self.device)
+        self.critic2 = QNetwork(state_dim, action_dim, hidden_dim).to(self.device)
         self.critic1_target = copy.deepcopy(self.critic1)
         self.critic2_target = copy.deepcopy(self.critic2)
-        
+
         self.critic_optimizer = optim.Adam(
-            list(self.critic1.parameters()) + list(self.critic2.parameters()), 
+            list(self.critic1.parameters()) + list(self.critic2.parameters()),
             lr=lr
         )
 
         self.target_entropy = -action_dim
-        self.log_alpha = torch.zeros(1, requires_grad=True)
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=lr)
         self.optimizer = self.policy_optimizer
 
@@ -157,7 +166,7 @@ class SACAgent:
         return state_vec.reshape(-1)
 
     def select_action(self, state, evaluate=False):
-        state = torch.FloatTensor(self._state_to_vector(state)).unsqueeze(0)
+        state = torch.FloatTensor(self._state_to_vector(state)).unsqueeze(0).to(self.device)
         if evaluate:
             mean, _ = self.policy(state)
             action = torch.tanh(mean)
@@ -168,11 +177,11 @@ class SACAgent:
     def optimize(self, batch_size=256):
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(batch_size)
 
-        states = torch.FloatTensor(states)
-        actions = torch.FloatTensor(actions)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1)
-        next_states = torch.FloatTensor(next_states)
-        dones = torch.FloatTensor(dones).unsqueeze(1)
+        states = torch.FloatTensor(states).to(self.device)
+        actions = torch.FloatTensor(actions).to(self.device)
+        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
+        next_states = torch.FloatTensor(next_states).to(self.device)
+        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
 
         with torch.no_grad():
             next_actions, next_log_probs = self.policy.sample(next_states)
@@ -239,7 +248,7 @@ class SACAgent:
 
     def load_model(self, model_path):
         """Load model checkpoints and optimizer states when available."""
-        checkpoint = torch.load(model_path, map_location='cpu')
+        checkpoint = torch.load(model_path, map_location=self.device)
         self.policy.load_state_dict(checkpoint['policy'])
         self.critic1.load_state_dict(checkpoint['critic1'])
         self.critic2.load_state_dict(checkpoint['critic2'])

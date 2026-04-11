@@ -1,12 +1,31 @@
 """Train the SAC agent with the ROS2 environment."""
 
 import argparse
-import json
 import os
-import sys
+import warnings
+from collections import deque
 from datetime import datetime
 
-# Check for torch and gym dependencies
+# PyTorch's autograd engine probes for CUDA devices during every backward pass,
+# even when all tensors live on CPU.  When the host NVIDIA driver version doesn't
+# match the CUDA runtime bundled in the PyTorch wheel this produces a noisy
+# UserWarning that is harmless for CPU-only training.  Filter it here, before any
+# torch import, so it never reaches the user's terminal.
+warnings.filterwarnings(
+    'ignore',
+    category=UserWarning,
+    message='CUDA initialization',
+)
+
+# Optional progress-bar support
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("Note: install tqdm for richer progress bars  →  pip install tqdm")
+
+# Optional tensorboard support
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_AVAILABLE = True
@@ -14,13 +33,12 @@ except ImportError:
     TENSORBOARD_AVAILABLE = False
     print("Warning: tensorboard not available. Install with: pip install tensorboard")
 
-import gymnasium as gym
+import gymnasium as gym  # noqa: F401 – keep for env registration side-effects
 
 # Import config (no environment dependencies)
 try:
     from config import TrainingConfig
 except ImportError:
-    # If not found, use local definition (for direct execution)
     from distance_based_rl.agent.config import TrainingConfig
 
 # Handle imports for both direct execution and module import
@@ -32,18 +50,34 @@ except ImportError:
     from sac_agent import SACAgent
 
 
-def setup_logging(output_dir):
-    """Set up tensorboard logging."""
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _log(msg: str) -> None:
+    """Print *msg* without breaking active tqdm bars."""
+    if TQDM_AVAILABLE:
+        tqdm.write(msg)
+    else:
+        print(msg)
+
+
+def setup_logging(output_dir: str):
+    """Set up tensorboard logging and return a SummaryWriter (or None)."""
     if not TENSORBOARD_AVAILABLE:
         return None
 
     log_dir = os.path.join(output_dir, 'logs', datetime.now().strftime('%Y%m%d_%H%M%S'))
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
-    print(f"TensorBoard logs will be saved to {log_dir}")
-    print(f"View with: tensorboard --logdir {log_dir}")
+    _log(f"TensorBoard logs  → {log_dir}")
+    _log(f"  tensorboard --logdir {log_dir}")
     return writer
 
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
 def train(config=None):
     """Train the SAC agent with ROS2 environment."""
@@ -56,17 +90,21 @@ def train(config=None):
     print(config)
     print()
 
-    # Create output directory
+    # Persist configuration
     os.makedirs(config.output_dir, exist_ok=True)
-
-    # Save configuration
     config_path = os.path.join(config.output_dir, 'config.json')
     config.save(config_path)
 
-    # Setup tensorboard
+    # Tensorboard
     writer = setup_logging(config.output_dir) if config.use_tensorboard else None
 
-    # Initialize environment and agent
+    # Resolve compute device
+    import torch
+    _cuda_env = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+    _cuda_disabled = _cuda_env is not None and _cuda_env.strip() == ''
+    device = 'cpu' if (_cuda_disabled or not torch.cuda.is_available()) else 'cuda'
+
+    # Build environment and agent
     print("Initializing environment and agent...")
     env = ManipulatorEnv()
     agent = SACAgent(
@@ -74,36 +112,69 @@ def train(config=None):
         action_dim=env.action_space.shape[0],
         hidden_dim=config.hidden_dim,
         lr=config.learning_rate,
-        buffer_size=config.buffer_size
+        buffer_size=config.buffer_size,
+        device=device,
     )
-    print(f"✓ Environment initialized: observation_space={env.observation_space.shape}, "
-          f"action_space={env.action_space.shape}")
-    print(f"✓ Agent initialized: hidden_dim={config.hidden_dim}, "
-          f"learning_rate={config.learning_rate}")
+    print(f"  device       : {device}")
+    print(f"  obs / act    : {env.observation_space.shape} / {env.action_space.shape}")
+    print(f"  hidden_dim   : {config.hidden_dim}")
+    print(f"  learning_rate: {config.learning_rate}")
     print()
-
-    # Training loop
-    print("Starting training...")
+    print("Starting training ...")
     print("-" * 60)
 
-    episode_rewards = []
+    # Running statistics
+    episode_rewards: list[float] = []
+    recent_rewards: deque[float] = deque(maxlen=10)
+    best_reward = float('-inf')
+
+    # ── outer bar: one tick per episode ─────────────────────────────────────
+    ep_bar = (
+        tqdm(
+            range(config.num_episodes),
+            desc="Training",
+            unit="ep",
+            dynamic_ncols=True,
+            colour="cyan",
+        )
+        if TQDM_AVAILABLE
+        else range(config.num_episodes)
+    )
 
     try:
-        for episode in range(config.num_episodes):
-            state, info = env.reset()  # [ROS] New random target position in ROS2 environment
+        for episode in ep_bar:
+            state, info = env.reset()          # [ROS] new random target in ROS2
             state_obj = info.get('state')
             done = False
-            total_reward = 0
+            total_reward = 0.0
             steps = 0
+            updates = 0
 
+            # ── inner bar: one tick per environment step ─────────────────────
+            step_bar = (
+                tqdm(
+                    total=config.max_steps_per_episode,
+                    desc=f"  ep {episode + 1:>{len(str(config.num_episodes))}}",
+                    unit="step",
+                    leave=False,
+                    dynamic_ncols=True,
+                    bar_format=(
+                        "{l_bar}{bar}| {n_fmt}/{total_fmt}"
+                        " [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+                    ),
+                )
+                if TQDM_AVAILABLE
+                else None
+            )
+
+            # ── episode rollout ──────────────────────────────────────────────
             while not done and steps < config.max_steps_per_episode:
-                # Select and execute action
                 action = agent.select_action(state_obj if state_obj is not None else state)
-                next_state, reward, terminated, truncated, step_info = env.step(action) # [ROS] Step in ROS2 environment
+                next_state, reward, terminated, truncated, step_info = env.step(action)  # [ROS]
                 next_state_obj = step_info.get('state')
                 done = terminated or truncated
 
-                # Store transition in replay buffer
+                # Store transition
                 if state_obj is not None and next_state_obj is not None:
                     transition = StateActionReward(
                         state=state_obj,
@@ -116,91 +187,116 @@ def train(config=None):
                 else:
                     agent.replay_buffer.push(state, action, reward, next_state, done)
 
-                # Optimize if buffer has enough samples
+                # Gradient updates — perform gradient_steps updates per env step
+                # to saturate the GPU while the slow ROS2/Gazebo env is the bottleneck.
                 if len(agent.replay_buffer) >= config.batch_size:
-                    agent.optimize(batch_size=config.batch_size)
+                    for _ in range(config.gradient_steps):
+                        agent.optimize(batch_size=config.batch_size)
+                    updates += config.gradient_steps
 
                 total_reward += reward
                 state = next_state
                 state_obj = next_state_obj
                 steps += 1
 
-            # Track episode metrics
-            episode_rewards.append(total_reward)
+                # Refresh inner bar
+                if step_bar is not None:
+                    step_bar.update(1)
+                    step_bar.set_postfix(
+                        r=f"{total_reward:+.2f}",
+                        buf=agent.get_buffer_size(),
+                        refresh=False,
+                    )
 
-            # Log to tensorboard
+            if step_bar is not None:
+                step_bar.close()
+
+            # ── episode bookkeeping ──────────────────────────────────────────
+            episode_rewards.append(total_reward)
+            recent_rewards.append(total_reward)
+            avg10 = sum(recent_rewards) / len(recent_rewards)
+            best_reward = max(best_reward, total_reward)
+
+            # Update outer bar postfix
+            if TQDM_AVAILABLE:
+                ep_bar.set_postfix(
+                    reward=f"{total_reward:+.2f}",
+                    avg10=f"{avg10:+.2f}",
+                    best=f"{best_reward:+.2f}",
+                    buf=agent.get_buffer_size(),
+                    upd=updates,
+                    refresh=True,
+                )
+
+            # Per-episode log line — always printed so the user has a scrolling
+            # record even when tqdm bars are active (tqdm.write routes above bars).
+            ep_width = len(str(config.num_episodes))
+            _log(
+                f"[ep {episode + 1:>{ep_width}}/{config.num_episodes}]"
+                f"  reward={total_reward:+8.2f}"
+                f"  avg10={avg10:+8.2f}"
+                f"  best={best_reward:+8.2f}"
+                f"  steps={steps:>4}"
+                f"  buf={agent.get_buffer_size():>6}"
+                f"  upd={updates:>4}"
+            )
+
+            # Tensorboard
             if writer is not None:
                 writer.add_scalar('rewards/episode', total_reward, episode)
-                writer.add_scalar('buffer_size', agent.get_buffer_size(), episode)
-                writer.add_scalar('episode_steps', steps, episode)
+                writer.add_scalar('rewards/avg10',   avg10,        episode)
+                writer.add_scalar('train/updates',   updates,      episode)
+                writer.add_scalar('train/updates_per_step', updates / max(steps, 1), episode)
+                writer.add_scalar('buffer_size',     agent.get_buffer_size(), episode)
+                writer.add_scalar('episode_steps',   steps,        episode)
 
-            # Print progress
-            if (episode + 1) % max(1, config.num_episodes // 10) == 0:
-                avg_reward = sum(episode_rewards[-10:]) / min(10, len(episode_rewards))
-                print(f"Episode {episode + 1}/{config.num_episodes} | "
-                      f"Total Reward: {total_reward:.2f} | "
-                      f"Avg Reward (last 10): {avg_reward:.2f} | "
-                      f"Steps: {steps} | "
-                      f"Buffer Size: {agent.get_buffer_size()}")
-
-            # Save checkpoint
+            # Checkpoint
             if (episode + 1) % config.checkpoint_interval == 0:
-                checkpoint_path = os.path.join(
+                ckpt_path = os.path.join(
                     config.output_dir,
-                    f'checkpoint_episode_{episode + 1}.pt'
+                    f'checkpoint_episode_{episode + 1}.pt',
                 )
-                agent.save_model(checkpoint_path)
+                agent.save_model(ckpt_path)
+                _log(f"  checkpoint saved → {ckpt_path}")
 
     except KeyboardInterrupt:
-        print("\n⚠ Training interrupted by user")
+        _log("\n⚠  Training interrupted by user")
 
     finally:
-        # Save final model
         final_model_path = os.path.join(config.output_dir, 'final_model.pt')
         agent.save_model(final_model_path)
-
-        # Close environment
         env.close()
-
-        # Close tensorboard writer
         if writer is not None:
             writer.close()
-            print(f"TensorBoard writer closed")
 
     print("-" * 60)
-    print(f"Training completed!")
-    print(f"Final model saved to: {final_model_path}")
-    print(f"Results saved to: {config.output_dir}")
+    print("Training completed!")
+    print(f"Final model → {final_model_path}")
+    print(f"Results     → {config.output_dir}")
     print("=" * 60)
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
     """Parse arguments and run training."""
     parser = argparse.ArgumentParser(
         description='Train SAC agent with distance-based reward in ROS2 environment'
     )
-    parser.add_argument('--num-episodes', type=int, default=1000,
-                        help='Number of training episodes (default: 1000)')
-    parser.add_argument('--max-steps', type=int, default=500,
-                        help='Maximum steps per episode (default: 500)')
-    parser.add_argument('--batch-size', type=int, default=256,
-                        help='Batch size for optimization (default: 256)')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
-                        help='Learning rate for optimizer (default: 3e-4)')
-    parser.add_argument('--buffer-size', type=int, default=10000,
-                        help='Replay buffer capacity (default: 10000)')
-    parser.add_argument('--hidden-dim', type=int, default=256,
-                        help='Hidden layer dimension for policy network (default: 256)')
-    parser.add_argument('--output-dir', type=str, default='output/',
-                        help='Output directory for results (default: output/)')
-    parser.add_argument('--checkpoint-interval', type=int, default=50,
-                        help='Save checkpoint every N episodes (default: 50)')
-    parser.add_argument('--no-tensorboard', action='store_true',
-                        help='Disable tensorboard logging')
-    parser.add_argument('--load-model', type=str, default=None,
-                        help='Path to model to load before training')
-    parser.add_argument('--config', type=str, default=None,
-                        help='Path to config JSON file to load')
+    parser.add_argument('--num-episodes',        type=int,   default=1000,    help='Number of training episodes (default: 1000)')
+    parser.add_argument('--max-steps',           type=int,   default=500,     help='Maximum steps per episode (default: 500)')
+    parser.add_argument('--batch-size',          type=int,   default=256,     help='Batch size for optimization (default: 256)')
+    parser.add_argument('--learning-rate',       type=float, default=3e-4,    help='Learning rate for optimizer (default: 3e-4)')
+    parser.add_argument('--buffer-size',         type=int,   default=10000,   help='Replay buffer capacity (default: 10000)')
+    parser.add_argument('--hidden-dim',          type=int,   default=256,     help='Hidden layer dimension for policy network (default: 256)')
+    parser.add_argument('--output-dir',          type=str,   default='output/', help='Output directory for results (default: output/)')
+    parser.add_argument('--checkpoint-interval', type=int,   default=50,      help='Save checkpoint every N episodes (default: 50)')
+    parser.add_argument('--gradient-steps',      type=int,   default=10,      help='Gradient updates per environment step — increases GPU utilization (default: 10)')
+    parser.add_argument('--no-tensorboard',      action='store_true',         help='Disable tensorboard logging')
+    parser.add_argument('--load-model',          type=str,   default=None,    help='Path to model to load before training')
+    parser.add_argument('--config',              type=str,   default=None,    help='Path to config JSON file to load')
 
     args = parser.parse_args()
 
@@ -219,9 +315,9 @@ def main():
             output_dir=args.output_dir,
             checkpoint_interval=args.checkpoint_interval,
             use_tensorboard=not args.no_tensorboard,
+            gradient_steps=args.gradient_steps,
         )
 
-    # Train agent
     train(config)
 
     # Optionally load model for evaluation

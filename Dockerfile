@@ -37,12 +37,23 @@ RUN apt-get update && apt-get install -y \
     ros-humble-joint-trajectory-controller \
     && rm -rf /var/lib/apt/lists/*
 
+# Install PyTorch for CUDA 12.8 explicitly before other packages so that
+# stable-baselines3 does not pull in a newer wheel compiled for CUDA 13.0+
+# (which exceeds what the host NVIDIA driver supports).
+# T2000 (Turing/sm_75) is fully supported by CUDA 12.x.
+RUN pip3 install \
+    "torch==2.7.0+cu128" \
+    "torchvision==0.22.0+cu128" \
+    "torchaudio==2.7.0+cu128" \
+    --index-url https://download.pytorch.org/whl/cu128
+
 # Install RL Python stack
 RUN pip3 install \
     gymnasium \
     stable-baselines3 \
     shimmy \
     tensorboard \
+    tqdm \
     keyboard \
     pynput
 

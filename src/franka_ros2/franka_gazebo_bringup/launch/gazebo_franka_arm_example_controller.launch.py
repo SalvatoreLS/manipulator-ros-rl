@@ -178,6 +178,16 @@ def generate_launch_description():
         output='screen'
     )
 
+    franka_robot_state_broadcaster = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=[
+            'franka_robot_state_broadcaster',
+            '--controller-manager-timeout', '30',
+        ],
+        output='screen'
+    )
+
     launch_controller = OpaqueFunction(
         function=load_controller,
         args=[controller]
@@ -198,7 +208,7 @@ def generate_launch_description():
         RegisterEventHandler(
             event_handler=OnProcessExit(
                 target_action=spawn,
-                on_exit=[joint_state_broadcaster],
+                on_exit=[joint_state_broadcaster, franka_robot_state_broadcaster],
             )
         ),
         RegisterEventHandler(

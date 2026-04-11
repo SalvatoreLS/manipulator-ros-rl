@@ -7,6 +7,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 import time
+import os
 
 from .data_handler import DataHandler
 
@@ -151,17 +152,21 @@ class ManipulatorEnv(gym.Env):
         
         self.target_position = self.node.get_target_position()
         
-        # Wait until we have valid data from subscribers
-        # Target should be updated by the service call, but we also need valid robot state
-        timeout_counter = 0
-        max_timeout = 100  # ~1 second at 100Hz
+        # Wait until we have valid data from subscribers.
+        # Use elapsed wall time instead of loop iterations to avoid instant timeout.
+        timeout_sec = float(os.getenv('FRANKA_STATE_WAIT_TIMEOUT_SEC', '5.0'))
+        poll_interval_sec = float(os.getenv('FRANKA_STATE_WAIT_POLL_SEC', '0.02'))
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        next_info_log = time.monotonic() + 0.5
         while rclpy.ok() and (self.node.get_manipulator_position() is None or self.node.get_target_position() is None):
-            timeout_counter += 1
-            if timeout_counter > max_timeout:
+            now = time.monotonic()
+            if now >= deadline:
                 self.node.get_logger().warning('Timeout waiting for robot state or target')
                 break
-            if timeout_counter % 50 == 0:  # Log every 0.5s
-                self.node.get_logger().info("Waiting for robot state and target...")
+            if now >= next_info_log:
+                self.node.get_logger().info('Waiting for robot state and target...')
+                next_info_log = now + 0.5
+            time.sleep(max(0.0, poll_interval_sec))
 
         state = self._build_state()
         return state.as_vector(), {"state": state}
@@ -173,21 +178,37 @@ class ManipulatorEnv(gym.Env):
         """
         if not self.node.publish_command(action): self.node.get_logger().warning("ROS2 not ready, failed to publish action command")
         else: self.node.get_logger().debug(f"Published action command: {action}")
-        
+
         # Allow time for the controller to process and state to update if needed
         time.sleep(0.05)  # TODO: tune the delay or sync it better
-        
-        curr_pos = self.node.get_manipulator_position() or (0.0, 0.0, 0.0)
-        target_pos = self.node.get_target_position() or (0.0, 0.0, 0.0)
-        
-        distance = np.linalg.norm(np.array(curr_pos) - np.array(target_pos))
-        reward = -distance
-        
+
+        curr_pos = self.node.get_manipulator_position()
+        target_pos = self.node.get_target_position()
+
+        # Guard: if either position is unavailable (ROS2 data not yet received), skip
+        # distance computation entirely.  Without this check, both positions would default
+        # to (0, 0, 0), distance collapses to 0, and the episode terminates spuriously with
+        # the success bonus.
+        if curr_pos is None or target_pos is None:
+            self.node.get_logger().warning(
+                "Position data unavailable during step (curr=%s, target=%s); skipping reward computation",
+                curr_pos, target_pos,
+            )
+            next_state = self._build_state()
+            return next_state.as_vector(), 0.0, False, False, {"state": next_state}
+
+        distance = np.linalg.norm(np.array(curr_pos, dtype=np.float64) - np.array(target_pos, dtype=np.float64))
+        reward = -float(distance)
+
         terminated = bool(distance < MIN_DISTANCE_THRESHOLD)
         truncated = False
 
-        if terminated: reward = 10.0 # TODO: verify this works well or change the value
-        
+        # Large positive bonus on success to provide a clear terminal signal.
+        # Must dominate typical per-step shaped rewards (≈ -0.1 to -1.0/step) so
+        # that successful episodes are unambiguously better than failed ones.
+        if terminated:
+            reward = 50.0
+
         next_state = self._build_state()
         return next_state.as_vector(), reward, terminated, truncated, {"state": next_state}
 
@@ -219,3 +240,9 @@ class ManipulatorEnv(gym.Env):
             rclpy.shutdown()
         if self.spin_thread is not None:
             self.spin_thread.join()
+
+    def log_data(self):
+        """
+        Log the training data to monitor progress.
+        """
+        pass

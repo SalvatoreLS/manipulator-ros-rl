@@ -5,13 +5,17 @@ Provide the collected information to the reinforcement learning agent.
 """
 
 import rclpy
+import rclpy.time
 import threading
+import os
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from geometry_msgs.msg import Point
 from typing import Optional, Tuple
 from std_msgs.msg import Float64MultiArray
 from std_srvs.srv import SetBool
+from sensor_msgs.msg import JointState
+import tf2_ros
 import numpy as np
 
 # Handle imports for both direct execution and module import
@@ -60,6 +64,8 @@ class DataHandler(Node):
         self._joint_velocities: Optional[Tuple[float, ...]] = None
         self._joint_efforts: Optional[Tuple[float, ...]] = None
         self._ros_ready = False
+        # True once state_callback (franka_robot_state_broadcaster) fires — suppresses TF-based EE updates
+        self._ee_from_state_cb = False
 
         # Intiialization of ROS2 node
         try: super().__init__('data_monitor')
@@ -68,14 +74,17 @@ class DataHandler(Node):
         # Callback group for thread safety
         cb_group = MutuallyExclusiveCallbackGroup()
 
+        robot_state_topic = os.getenv('FRANKA_ROBOT_STATE_TOPIC', '/franka_robot_state_broadcaster/robot_state')
+
         # Subscription for manipulator state
         self.create_subscription(
             _RobotStateType,
-            '/franka_robot_state_broadcaster/robot_state',
+            robot_state_topic,
             self.state_callback,
             10,
             callback_group=cb_group
         )
+        self.get_logger().info(f'Subscribed to robot state topic: {robot_state_topic}')
 
         # Subscription for target position (to compute reward in env)
         self.create_subscription(
@@ -84,6 +93,25 @@ class DataHandler(Node):
             self.target_callback,
             10,
             callback_group=cb_group
+        )
+
+        # TF2 buffer + listener: used to compute EE position when franka_robot_state_broadcaster
+        # is unavailable (e.g. Gazebo, where 'fr3/robot_state' hardware interface doesn't exist).
+        # robot_state_publisher reads /joint_states and publishes the full TF tree, so the EE
+        # frame (fr3_link8 in world) is available as long as joint_state_broadcaster is running.
+        self._ee_frame = os.getenv('FRANKA_EE_FRAME', 'fr3_link8')
+        self._base_frame = os.getenv('FRANKA_BASE_FRAME', 'world')
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
+        # Subscription for joint states — fallback for joint data and EE position in Gazebo
+        js_cb_group = MutuallyExclusiveCallbackGroup()
+        self.create_subscription(
+            JointState,
+            '/joint_states',
+            self._joint_state_callback,
+            10,
+            callback_group=js_cb_group,
         )
 
         # Publisher for target position (changed when resetting env)
@@ -127,8 +155,10 @@ class DataHandler(Node):
 
     def state_callback(self, msg):
         """
-        Callback that processes messages for the manipulator state.
+        Callback that processes messages from franka_robot_state_broadcaster.
         It extracts the end-effector position field and updates the state inside the node.
+        This is the primary source of EE position on real hardware; it is NOT available in
+        Gazebo (the 'fr3/robot_state' hardware interface doesn't exist there).
         """
         if len(msg.O_T_EE) >= 15:
             p = Point()
@@ -146,12 +176,71 @@ class DataHandler(Node):
                 self._joint_positions = joint_positions
                 self._joint_velocities = joint_velocities
                 self._joint_efforts = joint_efforts
+                self._ee_from_state_cb = True
             else:
                 with lock:
                     self._manipulator_position = p
                     self._joint_positions = joint_positions
                     self._joint_velocities = joint_velocities
                     self._joint_efforts = joint_efforts
+                    self._ee_from_state_cb = True
+
+    def _joint_state_callback(self, msg):
+        """
+        Callback for /joint_states (joint_state_broadcaster).
+        Always updates joint positions/velocities/efforts for the 7 arm joints.
+        When franka_robot_state_broadcaster is not available (Gazebo), also looks up the EE
+        position via TF2 using transforms published by robot_state_publisher.
+        """
+        _JOINT_ORDER = (
+            'fr3_joint1', 'fr3_joint2', 'fr3_joint3', 'fr3_joint4',
+            'fr3_joint5', 'fr3_joint6', 'fr3_joint7',
+        )
+
+        name_to_idx = {name: i for i, name in enumerate(msg.name)}
+        if not all(j in name_to_idx for j in _JOINT_ORDER):
+            return  # Expected joints not in this message
+
+        indices = [name_to_idx[j] for j in _JOINT_ORDER]
+
+        positions = tuple(msg.position[i] for i in indices) if msg.position else None
+        velocities = (
+            tuple(msg.velocity[i] for i in indices)
+            if msg.velocity and len(msg.velocity) > max(indices) else None
+        )
+        efforts = (
+            tuple(msg.effort[i] for i in indices)
+            if msg.effort and len(msg.effort) > max(indices) else None
+        )
+
+        # Look up EE position via TF only when franka_robot_state_broadcaster hasn't fired
+        ee_position = None
+        with self._lock:
+            needs_ee = not self._ee_from_state_cb
+        if needs_ee:
+            try:
+                t = self._tf_buffer.lookup_transform(
+                    self._base_frame,
+                    self._ee_frame,
+                    rclpy.time.Time(),
+                )
+                p = Point()
+                p.x = t.transform.translation.x
+                p.y = t.transform.translation.y
+                p.z = t.transform.translation.z
+                ee_position = p
+            except Exception:
+                pass  # TF not yet available; will retry on next callback
+
+        with self._lock:
+            if positions is not None:
+                self._joint_positions = positions
+            if velocities is not None:
+                self._joint_velocities = velocities
+            if efforts is not None:
+                self._joint_efforts = efforts
+            if ee_position is not None and not self._ee_from_state_cb:
+                self._manipulator_position = ee_position
 
     def target_callback(self, msg):
         """
@@ -167,17 +256,27 @@ class DataHandler(Node):
 
     def set_random_target(
         self,
-        bounds : Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]] = ((0.1, 0.9), (0.1, 0.9), (0.1, 0.9))
+        bounds : Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]] = ((0.2, 0.75), (0.0, 1.0), (0.17, 0.78))
     ) -> bool:
         """
         It sets a new random target position by publishing to /manipulator_target.
         It returns True if successful, False otherwise.
 
-        The position is generated in polar coordinates (r, phi, theta) and converted to Cartesian (x, y, z).
+        The position is generated in spherical coordinates and converted to Cartesian (x, y, z).
+
+        bounds:
+            bounds[0] = (r_min, r_max)            — radial distance in metres.
+                        Kept within [0.2, 0.75] to stay inside the FR3 workspace
+                        (~0.855 m max reach) and away from the near-base singularity.
+            bounds[1] = (phi_scale_min, phi_scale_max) — azimuth fraction of 2π.
+                        (0.0, 1.0) covers the full horizontal circle (0° – 360°).
+            bounds[2] = (theta_scale_min, theta_scale_max) — elevation fraction of π/2.
+                        (0.17, 0.78) → ~15° – 70° above the horizontal plane,
+                        avoiding near-floor collisions and overhead singularities.
         """
         if not getattr(self, '_ros_ready', False):
             return False
-        
+
         # Generate a random target position within bounds
         r = np.random.uniform(bounds[0][0], bounds[0][1])
         phi = np.random.uniform(bounds[1][0], bounds[1][1]) * np.pi * 2

@@ -18,6 +18,10 @@ class TrainingConfig:
         self.output_dir = kwargs.get('output_dir', 'output/')
         self.checkpoint_interval = kwargs.get('checkpoint_interval', 50)
         self.use_tensorboard = kwargs.get('use_tensorboard', True)
+        # Number of gradient updates to perform per environment step.
+        # The ROS2/Gazebo step blocks for ~50-100 ms while GPU updates take ~1 ms,
+        # so a UTD ratio > 1 is needed to saturate the GPU.
+        self.gradient_steps = kwargs.get('gradient_steps', 10)
 
     def save(self, path):
         """Save configuration to JSON file."""
@@ -30,6 +34,7 @@ class TrainingConfig:
             'buffer_size': self.buffer_size,
             'hidden_dim': self.hidden_dim,
             'checkpoint_interval': self.checkpoint_interval,
+            'gradient_steps': self.gradient_steps,
         }
         with open(path, 'w') as f:
             json.dump(config_dict, f, indent=2)

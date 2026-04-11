@@ -7,12 +7,12 @@ COMPOSE_FILE="docker-compose.yaml"
 WORKDIR="/ros2_rl_ws"
 WRAPPER="/entrypoint.sh"
 CONTROLLER="forward_position_controller"
-RVIZ="true"
+RVIZ="false"
 WAIT_TIMEOUT_SEC=90
-KEEP_CONTAINER="false"
+KEEP_CONTAINER="true"
 
 # Training defaults
-NUM_EPISODES=1000
+NUM_EPISODES=10
 MAX_STEPS=500
 BATCH_SIZE=256
 LEARNING_RATE="3e-4"

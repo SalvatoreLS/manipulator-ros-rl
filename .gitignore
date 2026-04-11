@@ -33,6 +33,7 @@ htmlcov/
 
 # IDEs
 .vscode/
+.claude/
 .idea/
 *.swp
 *.swo
@@ -62,6 +63,7 @@ log/
 *.lib
 *.dll
 *.dylib
+output/*
 
 # CMake
 CMakeCache.txt
