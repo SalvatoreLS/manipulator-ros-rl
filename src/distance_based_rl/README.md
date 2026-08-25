@@ -62,9 +62,12 @@ distance_based_rl/
 **Action** — 7-D in `[-1, 1]`, an incremental joint move `q + a · 0.1 rad`, clipped to the
 FR3 joint limits.
 
-**Reward** — `-distance`, plus `+50` on reaching the target. Episode terminates below
-10 cm and truncates at the step budget; success is also reported at 5 cm and 2 cm in
-`info["success_at"]`.
+**Reward** — potential-based: `10·(d_prev - d) - 0.1·d - 0.01`, plus `+5` on reaching the
+target. The dominant term is the distance *closed* over the step, not the absolute
+distance. Episode terminates below 10 cm and truncates at the step budget; success is also
+reported at 5 cm and 2 cm in `info["success_at"]`. Weights are overridable through
+`FRANKA_PROGRESS_WEIGHT`, `FRANKA_DISTANCE_WEIGHT`, `FRANKA_STEP_COST` and
+`FRANKA_SUCCESS_BONUS`.
 
 ---
 
@@ -79,14 +82,14 @@ source install/setup.bash
 
 ```bash
 ros2 run distance_based_rl train_agent \
-  --num-episodes 300 --max-steps 300 --seed 0 --output-dir output/runs/sac/seed0
+  --num-episodes 150 --max-steps 150 --seed 0 --output-dir output/runs/sac/seed0
 ```
 
 Or let `execute_training_docker.sh` bring up the bridge, Gazebo and the training run
 together:
 
 ```bash
-./execute_training_docker.sh --num-episodes 300 --max-steps 300 --seed 0
+./execute_training_docker.sh --num-episodes 150 --max-steps 150 --seed 0
 ```
 
 ### Deploy

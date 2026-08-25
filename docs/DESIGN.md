@@ -100,11 +100,31 @@ state is shared with everything else in the process and is not a reliable channe
 
 ## Reward
 
-`r = -distance + 50·[reached]`, terminating when distance < 10 cm.
+Potential-based shaping (Ng et al., 1999):
 
-The bonus is **additive** rather than replacing the distance term, so the shaped gradient
-still exists on the terminal step — with `r = +50` flat, the last transition would carry no
-information about *where* in the goal region the arm ended up.
+```
+r = 10·(d_prev - d)  -  0.1·d  -  0.01  +  5·[reached]
+```
+
+terminating when `d < 10 cm`. All four weights are `FRANKA_*` environment overrides in
+`environment/env_config.py`.
+
+The dominant term is the *reduction* in distance over the step, not the absolute distance.
+A plain `-distance` reward (what this was originally) encodes only where the arm is, never
+whether the action helped: every action from a given state scores about the same, and the
+learning signal has to come out of the value function alone. Rewarding progress leaves the
+optimal policy unchanged — that is the point of potential-based shaping — while giving a
+dense, per-step signal. Scales are chosen so a full-speed approach (~0.03 m/step) lands
+around +0.3, keeping per-step reward roughly in `[-1, +1]`.
+
+The residual `-0.1·d` keeps a gradient pointing at the target when progress stalls near
+zero, and the `-0.01` step cost makes dawdling next to the target worse than reaching it.
+
+The success bonus is **additive** rather than replacing the shaped terms, so the gradient
+still exists on the terminal step — with a flat terminal reward, the last transition would
+carry no information about *where* in the goal region the arm ended up. It is deliberately
+small (5.0, previously 50.0): at 50 the terminal step was a ~150x discontinuity, and the
+critic spent most of its capacity fitting that cliff rather than the shaped landscape.
 
 Termination at 10 cm is a deliberately generous criterion. Because it is generous, success
 is *reported* at 10, 5 and 2 cm (`info["success_at"]`), so the headline number cannot be
