@@ -17,7 +17,7 @@ BUFFER_SIZE=50000
 HIDDEN_DIM=256
 OUTPUT_DIR="output/"
 CHECKPOINT_INTERVAL=50
-GRADIENT_STEPS=6
+GRADIENT_STEPS=1
 WARMUP_STEPS=1000
 NO_TENSORBOARD="false"
 LOAD_MODEL=""
@@ -217,6 +217,36 @@ require_ros_executable() {
     fi
 }
 
+# This script's own process group, so cleanup() can refuse to signal it.
+SELF_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
+
+# Start a command in its own process group and report that group's id, so the whole
+# process tree it spawns can be signalled as a unit later.  setsid execs the command
+# directly when the shell is non-interactive (no job control), so the pid it reports
+# is the group leader; resolving the pgid from /proc rather than assuming pgid == pid
+# keeps this correct either way.
+start_in_own_group() {
+    setsid "$@" &
+    local pid=$!
+    local pgid=""
+    local i
+    # Wait for the child to actually land in its OWN group.  Reading the pgid too early
+    # returns this shell's group — setsid() has not run yet — and cleanup would then
+    # skip it via the self-guard, silently leaking the whole tree.  Retry until the pgid
+    # differs from ours; fall back to the pid, which is what setsid makes it anyway.
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+        [[ -n "$pgid" && "$pgid" != "$SELF_PGID" ]] && break
+        sleep 0.1
+    done
+    if [[ -z "$pgid" || "$pgid" == "$SELF_PGID" ]]; then
+        echo -e "${YELLOW}Warning:${NC} could not resolve a private process group for pid ${pid}; using pid as pgid." >&2
+        pgid="$pid"
+    fi
+    STARTED_PID="$pid"
+    STARTED_PGID="${pgid:-$pid}"
+}
+
 cleanup() {
     if [[ "${CLEANUP_DONE:-false}" == "true" ]]; then
         return
@@ -225,24 +255,50 @@ cleanup() {
 
     echo -e "\n${YELLOW}Stopping training stack...${NC}"
 
-    # Kill only the processes THIS invocation started, by PID — never a global
-    # pkill on the process name.  Several of these scripts may run concurrently on
-    # different ROS_DOMAIN_IDs (see scripts/run_experiments.sh), and a name-matching
+    # Kill only the processes THIS invocation started, by process GROUP — never a
+    # global pkill on the process name.  Several of these scripts may run concurrently
+    # on different ROS_DOMAIN_IDs (see scripts/run_experiments.sh), and a name-matching
     # pkill would tear down the other runs' simulations too.
-    local pid
-    for pid in "${LAUNCH_PID:-}" "${BRIDGE_PID:-}"; do
-        [[ -z "$pid" ]] && continue
-        # SIGINT the children first (ros2 launch forwards it to gzserver, the
-        # controller spawners and the bridge), then the process itself.
-        pkill -SIGINT -P "$pid" 2>/dev/null || true
-        kill -SIGINT "$pid" 2>/dev/null || true
+    #
+    # Signalling the group (rather than the PID, or the PID's direct children) is what
+    # makes this complete: `ros2 launch` starts Gazebo as a `sh -c ruby /usr/bin/ign
+    # gazebo` wrapper, so the simulator is a *grandchild*.  Killing LAUNCH_PID alone
+    # left those reparented to init, and every run leaked an idle Gazebo that kept
+    # burning cores for the rest of the sweep.  Both processes are started under
+    # `setsid`, so each owns a process group containing its whole tree.
+    # SIGTERM, not SIGINT.  A non-interactive shell starts background jobs with
+    # SIGINT and SIGQUIT set to SIG_IGN, and that disposition survives exec — so every
+    # process in these trees is literally incapable of dying from the SIGINT that the
+    # old cleanup (and the launch file's shutdown handler) sent it.  Verified:
+    # /proc/<pid>/status reports SigIgn: 0000000000000006 for the simulator.
+    # SIGTERM is not masked, and `ros2 launch` handles it as a graceful shutdown.
+    local pgid remaining
+    for pgid in "${LAUNCH_PGID:-}" "${BRIDGE_PGID:-}"; do
+        [[ -z "$pgid" ]] && continue
+        # Never signal our own group: that would kill this script (and, under
+        # run_experiments.sh, its siblings) instead of the run's stack.  Say so out
+        # loud — a silent skip here is exactly how a leaked stack goes unnoticed.
+        if [[ "$pgid" == "$SELF_PGID" ]]; then
+            echo -e "${RED}Warning:${NC} refusing to signal own process group (${pgid}); a run stack may be leaking." >&2
+            continue
+        fi
+        echo -e "  terminating process group ${pgid}"
+        kill -SIGTERM -- "-$pgid" 2>/dev/null || true
     done
 
-    sleep 2
+    sleep 3
 
-    for pid in "${LAUNCH_PID:-}" "${BRIDGE_PID:-}"; do
-        [[ -z "$pid" ]] && continue
-        kill -SIGKILL "$pid" 2>/dev/null || true
+    # Escalate: anything still standing gets SIGKILL, which nothing can mask.
+    for pgid in "${LAUNCH_PGID:-}" "${BRIDGE_PGID:-}"; do
+        [[ -z "$pgid" ]] && continue
+        [[ "$pgid" == "$SELF_PGID" ]] && continue
+        kill -SIGKILL -- "-$pgid" 2>/dev/null || true
+        sleep 0.5
+        # Report anything that somehow outlived SIGKILL, so a wedged run is visible
+        # in the console log instead of silently eating cores.
+        remaining="$(pgrep -g "$pgid" 2>/dev/null | tr '\n' ' ' || true)"
+        [[ -n "${remaining// /}" ]] && \
+            echo -e "${RED}Warning:${NC} PIDs still alive in group ${pgid}: ${remaining}"
     done
 
     echo -e "${GREEN}Cleanup complete.${NC}"
@@ -282,20 +338,48 @@ source_ros_environment
 
 # 2) Start bridge
 echo -e "${CYAN}2. Starting ROS-GZ Bridge...${NC}"
-ros2 run ros_gz_bridge parameter_bridge \
-    --ros-args -p config_file:="$WORKDIR/config/bridge.yaml" &
-BRIDGE_PID=$!
+start_in_own_group ros2 run ros_gz_bridge parameter_bridge \
+    --ros-args -p config_file:="$WORKDIR/config/bridge.yaml"
+BRIDGE_PID="$STARTED_PID"
+BRIDGE_PGID="$STARTED_PGID"
 
 sleep 2
 
 # 3) Start simulation
 echo -e "${CYAN}3. Starting simulation (Gazebo + optional RViz)...${NC}"
-ros2 launch franka_gazebo_bringup gazebo_franka_arm_example_controller.launch.py \
+
+# Training runs an unthrottled world (real_time_factor 0) instead of Gazebo's stock
+# empty.sdf, which is pinned to real time.  The environment is bound by waiting for
+# simulated motion, not by compute, so the sim clock is the main lever on run duration.
+# Set FRANKA_GZ_WORLD=empty.sdf to fall back to the stock real-time world.
+#
+# The world ships in this repository (config/worlds/), not in the vcs-fetched
+# franka_gazebo_bringup: anything dropped into src/franka_ros2/ is gitignored as
+# third-party and would not survive a fresh clone.  The bringup share directory is
+# still checked second, so an existing install that has it there keeps working.
+GZ_WORLD="${FRANKA_GZ_WORLD:-}"
+if [[ -z "$GZ_WORLD" ]]; then
+    if [[ -f "$WORKDIR/config/worlds/rl_empty.sdf" ]]; then
+        GZ_WORLD="$WORKDIR/config/worlds/rl_empty.sdf"
+    else
+        _bringup_share="$(ros2 pkg prefix franka_gazebo_bringup 2>/dev/null)/share/franka_gazebo_bringup"
+        if [[ -f "${_bringup_share}/worlds/rl_empty.sdf" ]]; then
+            GZ_WORLD="${_bringup_share}/worlds/rl_empty.sdf"
+        else
+            echo -e "${YELLOW}Warning:${NC} rl_empty.sdf not found; falling back to stock empty.sdf (real-time)."
+            GZ_WORLD="empty.sdf"
+        fi
+    fi
+fi
+echo -e "${CYAN}Gazebo world:${NC} $GZ_WORLD"
+
+start_in_own_group ros2 launch franka_gazebo_bringup gazebo_franka_arm_example_controller.launch.py \
     load_gripper:=true \
     controller:="$CONTROLLER" \
     rviz:="$RVIZ" \
-    gz_args:="-s -r empty.sdf" &
-LAUNCH_PID=$!
+    gz_args:="-s -r $GZ_WORLD"
+LAUNCH_PID="$STARTED_PID"
+LAUNCH_PGID="$STARTED_PGID"
 
 echo -e "${CYAN}Waiting for ROS topics required by training...${NC}"
 if ! wait_for_robot_state_topic "$WAIT_TIMEOUT_SEC"; then
@@ -321,6 +405,13 @@ TRAIN_ENV=(
     FRANKA_STATE_WAIT_TIMEOUT_SEC="$STATE_WAIT_TIMEOUT_SEC"
     FRANKA_STATE_WAIT_POLL_SEC="$STATE_WAIT_POLL_SEC"
     MAX_STEPS_PER_EPISODE="$MAX_STEPS"
+    # Keep the numeric libraries single-threaded.  torch.set_num_threads() in train.py
+    # covers torch's own pools, but OpenMP/MKL read these before torch is imported and
+    # would otherwise spawn one thread per core inside every concurrent run.  The
+    # simulators are the bottleneck; they need those cores more than a 256-wide MLP does.
+    OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+    MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+    TORCH_NUM_THREADS="${TORCH_NUM_THREADS:-1}"
 )
 
 if [[ "$CUDA_MODE" == "off" ]]; then

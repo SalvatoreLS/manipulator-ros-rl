@@ -1,0 +1,89 @@
+<?xml version="1.0" ?>
+<!--
+  Training world for the RL sweep.
+
+  Identical to Gazebo Fortress's stock empty.sdf except for one line: the real-time
+  factor is unlimited.  Training does not watch the simulation, and the environment
+  spends nearly all of its wall time waiting for simulated arm motion to finish
+  (see ManipulatorEnv._wait_until_settled) — with real_time_factor 1.0 that wait is
+  paid at 1 s of wall clock per 1 s of simulated motion no matter how idle the CPU is.
+  Setting it to 0 lets physics run as fast as the machine allows, which is the single
+  biggest lever on sweep duration.
+
+  The world name is deliberately still "empty": the bridge config and the spawn call
+  refer to it, and renaming would silently break topic remapping.
+
+  max_step_size is left at 1 ms.  Raising it would cut physics work further but changes
+  the controller's effective discretisation, which would make runs incomparable with
+  the existing sac baselines.
+
+  Use the stock empty.sdf instead (gz_args:="-s -r empty.sdf") if you want a run that
+  is directly wall-clock comparable to the pre-2026-08-25 baselines.
+-->
+<sdf version="1.6">
+  <world name="empty">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <!-- 0 = run as fast as the CPU allows, instead of throttling to real time. -->
+      <real_time_factor>0</real_time_factor>
+    </physics>
+    <plugin
+      filename="ignition-gazebo-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="ignition-gazebo-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin
+      filename="ignition-gazebo-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin
+      filename="ignition-gazebo-contact-system"
+      name="gz::sim::systems::Contact">
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100 100</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.8 0.8 0.8 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
