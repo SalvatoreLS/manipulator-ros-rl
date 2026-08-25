@@ -398,15 +398,46 @@ class TestManipulatorEnvStep:
         env._wait_until_settled = lambda: None
         return env
 
-    def test_reward_is_negative_distance(self):
+    def test_reward_without_a_reference_distance_is_the_residual_terms(self):
+        # No previous distance recorded, so the progress term is zero by construction and
+        # only the residual pull and the step cost remain.
         env = self._env_with_positions((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
 
         _, reward, terminated, truncated, info = env.step(np.zeros(7))
 
-        assert reward == pytest.approx(-1.0)
+        expected = -env.config.distance_weight * 1.0 - env.config.step_cost
+        assert reward == pytest.approx(expected)
+        assert info['progress'] == pytest.approx(0.0)
         assert terminated is False
         assert truncated is False
         assert info['distance'] == pytest.approx(1.0)
+
+    def test_progress_term_rewards_closing_the_distance(self):
+        # Two steps: the second is scored against the distance the first ended at, so
+        # moving 0.4 m closer must dominate the reward.
+        env = self._env_with_positions((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+        env.step(np.zeros(7))                                   # establishes d_prev = 1.0
+        env.node.get_manipulator_position.return_value = (0.4, 0.0, 0.0)
+
+        _, reward, _, _, info = env.step(np.zeros(7))
+
+        assert info['progress'] == pytest.approx(0.4)
+        expected = (
+            env.config.progress_weight * 0.4
+            - env.config.distance_weight * 0.6
+            - env.config.step_cost
+        )
+        assert reward == pytest.approx(expected)
+
+    def test_moving_away_from_the_target_is_penalised(self):
+        env = self._env_with_positions((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+        env.step(np.zeros(7))                                   # establishes d_prev = 1.0
+        env.node.get_manipulator_position.return_value = (-0.2, 0.0, 0.0)
+
+        _, reward, _, _, info = env.step(np.zeros(7))
+
+        assert info['progress'] == pytest.approx(-0.2)
+        assert reward < 0.0
 
     def test_reaching_target_terminates_with_bonus(self):
         env = self._env_with_positions((0.0, 0.0, 0.0), (0.02, 0.0, 0.0))
@@ -415,8 +446,13 @@ class TestManipulatorEnvStep:
 
         assert terminated is True
         assert info['success'] is True
-        # Bonus is additive, so the distance-shaped gradient survives the terminal step.
-        assert reward == pytest.approx(env.config.success_bonus - 0.02)
+        # Bonus is additive, so the shaped gradient survives the terminal step.
+        expected = (
+            env.config.success_bonus
+            - env.config.distance_weight * 0.02
+            - env.config.step_cost
+        )
+        assert reward == pytest.approx(expected)
 
     def test_success_reported_at_every_threshold(self):
         env = self._env_with_positions((0.0, 0.0, 0.0), (0.07, 0.0, 0.0))

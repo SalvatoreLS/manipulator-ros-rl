@@ -38,7 +38,7 @@ except ImportError:
 from distance_based_rl.agent.config import TrainingConfig
 from distance_based_rl.agent.sac_agent import SACAgent
 from distance_based_rl.environment.arm_env import ManipulatorEnv, StateActionReward
-from distance_based_rl.environment.env_config import EnvConfig
+from distance_based_rl.environment.env_config import EnvConfig, _env_int
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +122,15 @@ def train(config=None, resume_from=None):
     if device == 'cuda':
         # Allow cuDNN to auto-select the fastest kernels for fixed-size inputs.
         torch.backends.cudnn.benchmark = True
+
+    # Torch defaults to one CPU thread per physical core (6 on this machine), but the
+    # networks here are two 256-wide layers running on the GPU — there is no CPU work
+    # worth parallelising.  Under scripts/run_experiments.sh several trainings run
+    # concurrently, each alongside its own Gazebo, so the default would put ~18 torch
+    # threads on 6 physical cores and steal time from the simulators, which ARE the
+    # bottleneck.  One thread per trainer leaves the cores to physics.
+    # Override with TORCH_NUM_THREADS if a CPU-only run ever needs more.
+    torch.set_num_threads(max(1, _env_int('TORCH_NUM_THREADS', 1)))
 
     # Seed every source of randomness in the process. The env's own generator is seeded
     # through the constructor below.
@@ -429,8 +438,11 @@ def main():
                         help='Output directory for results (default: output/)')
     parser.add_argument('--checkpoint-interval', type=int,   default=50,
                         help='Save checkpoint every N episodes (default: 50)')
-    parser.add_argument('--gradient-steps',      type=int,   default=6,
-                        help='Gradient updates per environment step — increases GPU utilization (default: 6)')
+    parser.add_argument('--gradient-steps',      type=int,   default=1,
+                        help='Gradient updates per environment step. Raising this costs far more '
+                             'wall clock than the GPU work implies (the updates hold the GIL and '
+                             'starve the ROS executor): 6 measured 5x slower end to end than 1. '
+                             'See agent/config.py and scripts/bench_optimize.py (default: 1)')
     parser.add_argument('--warmup-steps',        type=int,   default=1000,
                         help='Initial env steps using random actions before the policy (default: 1000)')
     parser.add_argument('--seed',                type=int,   default=None,

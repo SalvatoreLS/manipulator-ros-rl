@@ -215,7 +215,14 @@ class SACAgent:
         )
 
         self.target_entropy  = -action_dim
-        self.log_alpha       = torch.zeros(1, requires_grad=True, device=self.device)
+        # Initialise log_alpha at log(alpha) rather than 0.  Starting at 0 means alpha=1.0
+        # on the first optimize() call — and since the shaped per-step reward is O(0.1-1),
+        # an entropy coefficient of 1.0 lets the entropy term dominate the Q term for the
+        # first few thousand updates, keeping the policy near-random.  Auto-tuning still
+        # moves alpha from here; this only fixes where it starts.
+        self.log_alpha       = torch.full(
+            (1,), float(np.log(alpha)), requires_grad=True, device=self.device
+        )
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=lr)
         self.optimizer       = self.policy_optimizer
 

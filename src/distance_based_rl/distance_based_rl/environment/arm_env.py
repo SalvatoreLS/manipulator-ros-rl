@@ -181,6 +181,8 @@ class ManipulatorEnv(gym.Env):
 
         self._max_episode_steps = self.config.max_episode_steps
         self._step_count = 0
+        # Distance at the previous step, for the potential-based progress reward.
+        self._prev_distance = None
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(7,), dtype=np.float32)
         if seed is not None:
@@ -245,7 +247,25 @@ class ManipulatorEnv(gym.Env):
 
         self._step_count = 0
         state = self._build_state()
+        # Seed the progress reward with the distance the episode starts from, so the
+        # first step is scored against the home pose rather than against nothing.
+        self._prev_distance = self._current_distance()
         return state.as_vector(), {"state": state}
+
+    def _current_distance(self):
+        """
+        Euclidean EE-to-target distance, or None when either position is unavailable.
+
+        Returning None (rather than 0.0) matters: a missing reading must not look like a
+        perfect reach, either to the progress reward or to the termination check.
+        """
+        curr_pos = self.node.get_manipulator_position()
+        target_pos = self.node.get_target_position()
+        if curr_pos is None or target_pos is None:
+            return None
+        return float(np.linalg.norm(
+            np.array(curr_pos, dtype=np.float64) - np.array(target_pos, dtype=np.float64)
+        ))
 
     def step(self, action):
         """
@@ -279,6 +299,9 @@ class ManipulatorEnv(gym.Env):
             )
             next_state = self._build_state()
             truncated = self._step_count >= self._max_episode_steps
+            # Drop the stale reference distance: without this the next valid step would
+            # score its progress against a measurement from before the gap.
+            self._prev_distance = None
             return next_state.as_vector(), 0.0, False, truncated, {"state": next_state, "success": False}
 
         distance = np.linalg.norm(np.array(curr_pos, dtype=np.float64) - np.array(target_pos, dtype=np.float64))
@@ -286,14 +309,29 @@ class ManipulatorEnv(gym.Env):
         terminated = bool(distance < self.config.min_distance_threshold)
         truncated  = (not terminated) and self._step_count >= self._max_episode_steps
 
-        # Additive bonus: preserves distance-shaped gradient at the terminal step.
-        reward = -float(distance) + (self.config.success_bonus if terminated else 0.0)
+        # Potential-based shaping (Ng et al., 1999): the dominant term is the *reduction*
+        # in distance over this step, which leaves the optimal policy unchanged but gives
+        # a dense signal every step.  A plain -distance reward only encodes where the arm
+        # is, not whether the action helped.  The residual -distance_weight * distance
+        # keeps a gradient when progress stalls; step_cost makes dawdling cost something.
+        prev_distance = self._prev_distance if self._prev_distance is not None else distance
+        progress = prev_distance - distance
+        reward = (
+            self.config.progress_weight * progress
+            - self.config.distance_weight * distance
+            - self.config.step_cost
+        )
+        # Additive bonus: preserves the shaped gradient at the terminal step.
+        if terminated:
+            reward += self.config.success_bonus
+        self._prev_distance = distance
 
         next_state = self._build_state()
         return next_state.as_vector(), reward, terminated, truncated, {
             "state":    next_state,
             "success":  terminated,
             "distance": float(distance),
+            "progress": float(progress),
             # Success at several tolerances, so the reported rate is not tied to the
             # single (generous) threshold that ends the episode.
             "success_at": {

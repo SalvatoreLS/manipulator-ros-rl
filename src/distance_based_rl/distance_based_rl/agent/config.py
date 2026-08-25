@@ -19,14 +19,23 @@ class TrainingConfig:
         self.checkpoint_interval = kwargs.get('checkpoint_interval', 50)
         self.use_tensorboard = kwargs.get('use_tensorboard', True)
         # Number of gradient updates to perform per environment step.
-        # Each optimize() call costs ~7-8 ms of Python dispatch overhead on top of
-        # actual GPU compute (~1 ms).  The env.step() blocks for ~50 ms (ROS2 sleep),
-        # which is the async window available for gradient work.  Keeping
-        # gradient_steps * ~8 ms ≤ 50 ms ensures updates finish before the next
-        # action selection — eliminating the per-step wait entirely.
-        # On this hardware: 6 × 8 ms = 48 ms < 50 ms (fits with a small margin).
-        # Increase if env.step() is slower (e.g. --state-wait-timeout > 5 s).
-        self.gradient_steps = kwargs.get('gradient_steps', 6)
+        #
+        # This was 6, sized on the theory that 6 x ~8 ms of gradient work hides inside
+        # env.step()'s ~50 ms of ROS2 waiting.  The per-call cost is right (measured
+        # 7.87 ms mean; see scripts/bench_optimize.py) but the conclusion was not:
+        # the updates run on a background thread, and between CUDA dispatches they hold
+        # the GIL, starving the ROS executor that _wait_until_settled() polls.  The
+        # settle detection then rides its timeout on every step.  Measured end to end:
+        #
+        #   gradient_steps=6 ->  1.94 step/s  (516 ms/step)
+        #   gradient_steps=1 ->  9.76 step/s  (102 ms/step)
+        #
+        # Each extra update costs ~83 ms of wall clock in situ, ~10x its standalone
+        # cost.  One update per env step is also the SAC default, and because the
+        # environment now runs 5x faster the number of updates per second of wall clock
+        # is unchanged — the same learning, against five times as much fresh data.
+        # Raise this only after re-measuring; it is not a free knob.
+        self.gradient_steps = kwargs.get('gradient_steps', 1)
         # Number of initial environment steps that use uniformly random actions before the
         # policy takes over. Seeds the replay buffer with diverse transitions and avoids
         # early policy collapse — standard SAC warm-up.

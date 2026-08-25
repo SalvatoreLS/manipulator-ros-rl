@@ -57,9 +57,39 @@ class EnvConfig:
     # quoted honestly at several tolerances rather than only the most generous.
     report_thresholds: Tuple[float, ...] = (0.10, 0.05, 0.02)
 
+    # ── Reward shaping ─────────────────────────────────────────────────────────
+    # The reward is potential-based (Ng et al., 1999): the dominant term rewards the
+    # *reduction* in distance over the step rather than the absolute distance. This keeps
+    # the optimal policy unchanged while giving a dense, well-scaled learning signal at
+    # every step instead of a flat penalty that only says where the arm is.
+    #
+    #   reward = progress_weight * (d_prev - d)  -  distance_weight * d  -  step_cost
+    #            + success_bonus                 (terminating step only)
+    #
+    # Scales are chosen so per-step magnitudes land in roughly [-1, +1]: a full-speed
+    # approach moves ~0.03 m/step, so progress_weight=10 gives ~+0.3.
+    progress_weight: float = field(
+        default_factory=lambda: _env_float('FRANKA_PROGRESS_WEIGHT', 10.0)
+    )
+
+    # Small residual pull toward the target; keeps a gradient when progress is ~0
+    # (e.g. the arm has stalled) without dominating the progress term.
+    distance_weight: float = field(
+        default_factory=lambda: _env_float('FRANKA_DISTANCE_WEIGHT', 0.1)
+    )
+
+    # Constant per-step penalty, so dawdling near the target is worse than reaching it.
+    step_cost: float = field(
+        default_factory=lambda: _env_float('FRANKA_STEP_COST', 0.01)
+    )
+
     # Additive bonus on the terminating step. Additive (not replacing) so the
-    # distance-shaped gradient survives at the terminal step.
-    success_bonus: float = 50.0
+    # shaped gradient survives at the terminal step. Deliberately the same order of
+    # magnitude as a few steps of progress reward: a large bonus (the previous 50.0)
+    # creates a ~150x discontinuity that the critic spends most of its capacity fitting.
+    success_bonus: float = field(
+        default_factory=lambda: _env_float('FRANKA_SUCCESS_BONUS', 5.0)
+    )
 
     # ── Action ─────────────────────────────────────────────────────────────────
     # Maximum joint movement commanded per environment step (rad). Small increments keep
@@ -79,16 +109,16 @@ class EnvConfig:
 
     # ── Settle detection (replaces a fixed sleep after each command) ───────────
     settle_min_dwell_sec: float = field(
-        default_factory=lambda: _env_float('FRANKA_SETTLE_MIN_DWELL_SEC', 0.05)
+        default_factory=lambda: _env_float('FRANKA_SETTLE_MIN_DWELL_SEC', 0.02)
     )
     settle_timeout_sec: float = field(
-        default_factory=lambda: _env_float('FRANKA_SETTLE_TIMEOUT_SEC', 0.5)
+        default_factory=lambda: _env_float('FRANKA_SETTLE_TIMEOUT_SEC', 0.2)
     )
     settle_poll_sec: float = field(
-        default_factory=lambda: _env_float('FRANKA_SETTLE_POLL_SEC', 0.02)
+        default_factory=lambda: _env_float('FRANKA_SETTLE_POLL_SEC', 0.01)
     )
     settle_vel_thresh: float = field(
-        default_factory=lambda: _env_float('FRANKA_SETTLE_VEL_THRESH', 0.05)
+        default_factory=lambda: _env_float('FRANKA_SETTLE_VEL_THRESH', 0.1)
     )  # rad/s
 
     # ── ROS2 topics and frames ─────────────────────────────────────────────────
