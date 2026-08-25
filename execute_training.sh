@@ -12,17 +12,21 @@ WAIT_TIMEOUT_SEC=90
 KEEP_CONTAINER="true"
 
 # Training defaults
-NUM_EPISODES=10
+NUM_EPISODES=1000
 MAX_STEPS=500
 BATCH_SIZE=256
 LEARNING_RATE="3e-4"
-BUFFER_SIZE=10000
+BUFFER_SIZE=50000
 HIDDEN_DIM=256
 OUTPUT_DIR="output/"
 CHECKPOINT_INTERVAL=50
+GRADIENT_STEPS=6
 NO_TENSORBOARD="false"
 LOAD_MODEL=""
 CONFIG_PATH=""
+STATE_WAIT_TIMEOUT_SEC="5.0"
+STATE_WAIT_POLL_SEC="0.02"
+CUDA_MODE="auto"
 
 # Colors
 GREEN='\033[0;32m'
@@ -52,9 +56,13 @@ Training options (forwarded to train_agent):
   --hidden-dim N                (default: ${HIDDEN_DIM})
   --output-dir PATH             (default: ${OUTPUT_DIR})
   --checkpoint-interval N       (default: ${CHECKPOINT_INTERVAL})
+  --gradient-steps N            Gradient updates per env step (default: ${GRADIENT_STEPS})
   --no-tensorboard              Disable TensorBoard
   --load-model PATH             Load checkpoint before training
   --config PATH                 Load config JSON
+  --state-wait-timeout SEC      Wait timeout inside env reset (default: ${STATE_WAIT_TIMEOUT_SEC})
+  --state-wait-poll SEC         Poll interval inside env reset (default: ${STATE_WAIT_POLL_SEC})
+  --cuda auto|off               CUDA mode for PyTorch (default: ${CUDA_MODE})
 
 Other:
   -h, --help                    Show this help
@@ -83,9 +91,13 @@ while [[ $# -gt 0 ]]; do
         --hidden-dim) HIDDEN_DIM="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --checkpoint-interval) CHECKPOINT_INTERVAL="$2"; shift 2 ;;
+        --gradient-steps) GRADIENT_STEPS="$2"; shift 2 ;;
         --no-tensorboard) NO_TENSORBOARD="true"; shift 1 ;;
         --load-model) LOAD_MODEL="$2"; shift 2 ;;
         --config) CONFIG_PATH="$2"; shift 2 ;;
+        --state-wait-timeout) STATE_WAIT_TIMEOUT_SEC="$2"; shift 2 ;;
+        --state-wait-poll) STATE_WAIT_POLL_SEC="$2"; shift 2 ;;
+        --cuda) CUDA_MODE="$2"; shift 2 ;;
 
         -h|--help) print_help; exit 0 ;;
         *)
@@ -96,11 +108,23 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$CUDA_MODE" != "auto" && "$CUDA_MODE" != "off" ]]; then
+    echo -e "${RED}Invalid --cuda value:${NC} $CUDA_MODE"
+    echo -e "${YELLOW}Allowed values:${NC} auto, off"
+    exit 1
+fi
+
 echo -e "${CYAN}=== Franka ROS2 RL Training Setup ===${NC}"
 
 topic_exists() {
     local topic="$1"
     docker exec -i "$CONTAINER_NAME" "$WRAPPER" ros2 topic list 2>/dev/null | grep -Fx "$topic" >/dev/null
+}
+
+find_robot_state_topic() {
+    docker exec -i "$CONTAINER_NAME" "$WRAPPER" ros2 topic list 2>/dev/null | \
+        grep -E '^(/[^ ]+)?/franka_robot_state_broadcaster/robot_state$' | \
+        head -n 1
 }
 
 wait_for_topic() {
@@ -113,6 +137,11 @@ wait_for_topic() {
             echo -e "${GREEN}Topic available:${NC} $topic"
             return 0
         fi
+
+        if (( elapsed % 5 == 0 )); then
+            echo -e "${CYAN}Waiting for topic:${NC} $topic (${elapsed}s/${timeout}s)"
+        fi
+
         sleep 1
         elapsed=$((elapsed + 1))
     done
@@ -121,15 +150,54 @@ wait_for_topic() {
     return 1
 }
 
+wait_for_robot_state_topic() {
+    local timeout="$1"
+    local elapsed=0
+
+    while (( elapsed < timeout )); do
+        local discovered_topic
+        discovered_topic="$(find_robot_state_topic || true)"
+
+        if [[ -n "$discovered_topic" ]]; then
+            ROBOT_STATE_TOPIC="$discovered_topic"
+            echo -e "${GREEN}Robot state topic available:${NC} $ROBOT_STATE_TOPIC"
+            return 0
+        fi
+
+        if (( elapsed % 5 == 0 )); then
+            echo -e "${CYAN}Waiting for robot state topic matching:${NC} */franka_robot_state_broadcaster/robot_state (${elapsed}s/${timeout}s)"
+        fi
+
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 1
+}
+
+require_ros_executable() {
+    local pkg="$1"
+    local exe="$2"
+
+    if ! docker exec -i "$CONTAINER_NAME" "$WRAPPER" ros2 pkg executables "$pkg" 2>/dev/null | grep -Fx "$pkg $exe" >/dev/null; then
+        echo -e "${RED}Missing ROS2 executable:${NC} $pkg $exe"
+        echo -e "${YELLOW}Hint:${NC} build and source the workspace, e.g. colcon build --packages-select $pkg"
+        return 1
+    fi
+}
+
 cleanup() {
+    if [[ "${CLEANUP_DONE:-false}" == "true" ]]; then
+        return
+    fi
+    CLEANUP_DONE="true"
+
     echo -e "\n${YELLOW}Stopping training stack...${NC}"
 
-    # Stop nodes/processes inside container
     docker exec "$CONTAINER_NAME" pkill -SIGINT -f "ros_gz_bridge" 2>/dev/null || true
     docker exec "$CONTAINER_NAME" pkill -SIGINT -f "ros2 launch franka_gazebo_bringup" 2>/dev/null || true
     docker exec "$CONTAINER_NAME" pkill -SIGINT -f "ros2 run distance_based_rl train_agent" 2>/dev/null || true
 
-    # Stop host-side docker exec wrappers
     [[ -n "${BRIDGE_PID:-}" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
     [[ -n "${LAUNCH_PID:-}" ]] && kill "$LAUNCH_PID" 2>/dev/null || true
 
@@ -145,7 +213,7 @@ cleanup() {
     echo -e "${GREEN}Cleanup complete.${NC}"
 }
 
-trap cleanup SIGINT SIGTERM
+trap cleanup EXIT SIGINT SIGTERM
 
 # 1) Start container
 echo -e "${CYAN}1. Launching Docker container...${NC}"
@@ -170,14 +238,37 @@ echo -e "${CYAN}3. Starting simulation (Gazebo + optional RViz)...${NC}"
 docker exec -i "$CONTAINER_NAME" "$WRAPPER" ros2 launch franka_gazebo_bringup gazebo_franka_arm_example_controller.launch.py \
     load_gripper:=true \
     controller:="$CONTROLLER" \
-    rviz:="$RVIZ" &
+    rviz:="$RVIZ" \
+    gz_args:="-s -r empty.sdf" &
 LAUNCH_PID=$!
 
 echo -e "${CYAN}Waiting for ROS topics required by training...${NC}"
-wait_for_topic "/franka_robot_state_broadcaster/robot_state" "$WAIT_TIMEOUT_SEC"
-wait_for_topic "/forward_position_controller/commands" "$WAIT_TIMEOUT_SEC"
+if ! wait_for_robot_state_topic "$WAIT_TIMEOUT_SEC"; then
+    echo -e "${YELLOW}Warning:${NC} no matching robot state topic found for */franka_robot_state_broadcaster/robot_state."
+    echo -e "${YELLOW}Training will still start; environment may use default state until messages arrive.${NC}"
+fi
+
+if ! wait_for_topic "/${CONTROLLER}/commands" "$WAIT_TIMEOUT_SEC"; then
+    echo -e "${YELLOW}Warning:${NC} /${CONTROLLER}/commands not available."
+    echo -e "${YELLOW}Training will start anyway; check controller_manager status if actions have no effect.${NC}"
+fi
 
 # 4) Build training command with defaults + optional args
+ROBOT_STATE_TOPIC="${ROBOT_STATE_TOPIC:-/franka_robot_state_broadcaster/robot_state}"
+echo -e "${CYAN}Using robot state topic:${NC} $ROBOT_STATE_TOPIC"
+
+DOCKER_ENV_ARGS=(
+    -e PYTHONUNBUFFERED=1
+    -e FRANKA_ROBOT_STATE_TOPIC="$ROBOT_STATE_TOPIC"
+    -e FRANKA_STATE_WAIT_TIMEOUT_SEC="$STATE_WAIT_TIMEOUT_SEC"
+    -e FRANKA_STATE_WAIT_POLL_SEC="$STATE_WAIT_POLL_SEC"
+    -e MAX_STEPS_PER_EPISODE="$MAX_STEPS"
+)
+
+if [[ "$CUDA_MODE" == "off" ]]; then
+    DOCKER_ENV_ARGS+=(-e CUDA_VISIBLE_DEVICES="")
+fi
+
 TRAIN_CMD=(
     ros2 run distance_based_rl train_agent
     --num-episodes "$NUM_EPISODES"
@@ -188,6 +279,7 @@ TRAIN_CMD=(
     --hidden-dim "$HIDDEN_DIM"
     --output-dir "$OUTPUT_DIR"
     --checkpoint-interval "$CHECKPOINT_INTERVAL"
+    --gradient-steps "$GRADIENT_STEPS"
 )
 
 if [[ "$NO_TENSORBOARD" == "true" ]]; then
@@ -200,11 +292,21 @@ if [[ -n "$CONFIG_PATH" ]]; then
     TRAIN_CMD+=(--config "$CONFIG_PATH")
 fi
 
+require_ros_executable "distance_based_rl" "train_agent"
+
 echo -e "${CYAN}4. Starting training...${NC}"
 echo -e "${GREEN}Press Ctrl+C to stop training and cleanup.${NC}"
+echo -e "${CYAN}Training command:${NC} ${TRAIN_CMD[*]}"
 
-docker exec -it "$CONTAINER_NAME" "$WRAPPER" "${TRAIN_CMD[@]}"
+set +e
+docker exec -it "${DOCKER_ENV_ARGS[@]}" "$CONTAINER_NAME" "$WRAPPER" "${TRAIN_CMD[@]}"
 STATUS=$?
+set -e
 
-cleanup
+if [[ "$STATUS" -ne 0 ]]; then
+    echo -e "${RED}Training process exited with status:${NC} $STATUS"
+else
+    echo -e "${GREEN}Training process completed successfully.${NC}"
+fi
+
 exit "$STATUS"

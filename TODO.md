@@ -6,7 +6,7 @@ I use the following stack for stability on Jammy Jellyfish:
 | **OS** | Ubuntu 22.04 (Jammy Jellyfish) |
 | **ROS 2** | Humble Hawksbill |
 | **Simulator** | Gazebo Fortress (Ignition) |
-| **RL Library** | Stable Baselines3 (SB3) |
+| **RL Library** | PyTorch — SAC implemented from scratch (SB3 only as a baseline) |
 | **Interface** | Gymnasium |
 
 ---

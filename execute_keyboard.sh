@@ -5,6 +5,7 @@ CONTAINER_NAME="franka_ros2_rl"
 COMPOSE_FILE="docker-compose.yaml"
 WORKDIR="/ros2_rl_ws"
 WRAPPER="/entrypoint.sh"
+RVIZ=false
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -30,10 +31,6 @@ cleanup() {
     
     # 3. Wait for graceful shutdown of nodes
     sleep 2
-    
-    # 4. Stop the container
-    echo -e "${CYAN}Stopping Docker container...${NC}"
-    docker compose -f $COMPOSE_FILE stop
     
     echo -e "${GREEN}Cleanup complete. Goodbye!${NC}"
     exit 0
@@ -67,7 +64,7 @@ echo -e "${CYAN}3. Starting Simulation (RViz + Gazebo)...${NC}"
 docker exec -i $CONTAINER_NAME $WRAPPER ros2 launch franka_gazebo_bringup gazebo_franka_arm_example_controller.launch.py \
      load_gripper:=true \
      controller:=forward_position_controller \
-     rviz:=true &
+     rviz:=${RVIZ} &
 LAUNCH_PID=$!
 
 # Wait for simulation to come up

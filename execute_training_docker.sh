@@ -9,21 +9,26 @@ RVIZ="false"
 WAIT_TIMEOUT_SEC=40
 
 # Training defaults
-NUM_EPISODES=1000 # 1000
-MAX_STEPS=400 # 500
-BATCH_SIZE=256 # 256
+NUM_EPISODES=1000
+MAX_STEPS=500
+BATCH_SIZE=256
 LEARNING_RATE="3e-4"
-BUFFER_SIZE=10000
+BUFFER_SIZE=50000
 HIDDEN_DIM=256
 OUTPUT_DIR="output/"
 CHECKPOINT_INTERVAL=50
-GRADIENT_STEPS=10
+GRADIENT_STEPS=6
+WARMUP_STEPS=1000
 NO_TENSORBOARD="false"
 LOAD_MODEL=""
 CONFIG_PATH=""
 STATE_WAIT_TIMEOUT_SEC="5.0"
 STATE_WAIT_POLL_SEC="0.02"
 CUDA_MODE="auto"
+SEED=""
+AGENT="sac"            # sac = from-scratch implementation, sb3 = Stable-Baselines3 baseline
+DOMAIN_ID=""           # ROS_DOMAIN_ID; isolates concurrent runs from each other
+BASELINE_STEPS=""      # total env steps for the sb3 baseline
 
 # Colors
 GREEN='\033[0;32m'
@@ -51,12 +56,18 @@ Training options (forwarded to train_agent):
   --output-dir PATH             (default: ${OUTPUT_DIR})
   --checkpoint-interval N       (default: ${CHECKPOINT_INTERVAL})
   --gradient-steps N            Gradient updates per env step (default: ${GRADIENT_STEPS})
+  --warmup-steps N              Random-action steps before the policy takes over (default: ${WARMUP_STEPS})
   --no-tensorboard              Disable TensorBoard
   --load-model PATH             Load checkpoint before training
   --config PATH                 Load config JSON
-    --state-wait-timeout SEC      Wait timeout inside env reset (default: ${STATE_WAIT_TIMEOUT_SEC})
-    --state-wait-poll SEC         Poll interval inside env reset (default: ${STATE_WAIT_POLL_SEC})
-    --cuda auto|off               CUDA mode for PyTorch (default: ${CUDA_MODE})
+  --state-wait-timeout SEC      Wait timeout inside env reset (default: ${STATE_WAIT_TIMEOUT_SEC})
+  --state-wait-poll SEC         Poll interval inside env reset (default: ${STATE_WAIT_POLL_SEC})
+  --cuda auto|off               CUDA mode for PyTorch (default: ${CUDA_MODE})
+  --seed N                      Master seed, makes the run reproducible (default: unseeded)
+  --agent sac|sb3               sac = from-scratch agent, sb3 = Stable-Baselines3 baseline (default: ${AGENT})
+  --baseline-steps N            Total env steps for --agent sb3 (default: num-episodes * max-steps)
+  --domain-id N                 ROS_DOMAIN_ID (0-101). Required to run several trainings
+                                concurrently, so their Gazebo/DDS graphs stay separate.
 
 Other:
   -h, --help                    Show this help
@@ -83,12 +94,17 @@ while [[ $# -gt 0 ]]; do
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --checkpoint-interval) CHECKPOINT_INTERVAL="$2"; shift 2 ;;
         --gradient-steps) GRADIENT_STEPS="$2"; shift 2 ;;
+        --warmup-steps) WARMUP_STEPS="$2"; shift 2 ;;
         --no-tensorboard) NO_TENSORBOARD="true"; shift 1 ;;
         --load-model) LOAD_MODEL="$2"; shift 2 ;;
         --config) CONFIG_PATH="$2"; shift 2 ;;
         --state-wait-timeout) STATE_WAIT_TIMEOUT_SEC="$2"; shift 2 ;;
         --state-wait-poll) STATE_WAIT_POLL_SEC="$2"; shift 2 ;;
         --cuda) CUDA_MODE="$2"; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
+        --agent) AGENT="$2"; shift 2 ;;
+        --baseline-steps) BASELINE_STEPS="$2"; shift 2 ;;
+        --domain-id) DOMAIN_ID="$2"; shift 2 ;;
 
         -h|--help) print_help; exit 0 ;;
         *)
@@ -103,6 +119,30 @@ if [[ "$CUDA_MODE" != "auto" && "$CUDA_MODE" != "off" ]]; then
     echo -e "${RED}Invalid --cuda value:${NC} $CUDA_MODE"
     echo -e "${YELLOW}Allowed values:${NC} auto, off"
     exit 1
+fi
+
+if [[ "$AGENT" != "sac" && "$AGENT" != "sb3" ]]; then
+    echo -e "${RED}Invalid --agent value:${NC} $AGENT"
+    echo -e "${YELLOW}Allowed values:${NC} sac, sb3"
+    exit 1
+fi
+
+: "${BASELINE_STEPS:=$((NUM_EPISODES * MAX_STEPS))}"
+
+if [[ -n "$DOMAIN_ID" ]]; then
+    if ! [[ "$DOMAIN_ID" =~ ^[0-9]+$ ]] || (( DOMAIN_ID > 101 )); then
+        echo -e "${RED}Invalid --domain-id:${NC} $DOMAIN_ID (expected 0-101)"
+        exit 1
+    fi
+    # Exported before anything ROS starts, so the bridge, the simulation and the
+    # trainer all join the same isolated DDS domain.
+    export ROS_DOMAIN_ID="$DOMAIN_ID"
+    # Gazebo transport has its own discovery, independent of DDS: without a distinct
+    # partition two concurrent simulations would share gz topics (both publish
+    # /world/default/model/fr3/joint_state) and the bridges would cross-feed.
+    export GZ_PARTITION="rl${DOMAIN_ID}"
+    export IGN_PARTITION="rl${DOMAIN_ID}"   # Fortress still reads the IGN_ name
+    echo -e "${CYAN}ROS_DOMAIN_ID:${NC} $ROS_DOMAIN_ID  ${CYAN}GZ_PARTITION:${NC} $GZ_PARTITION"
 fi
 
 echo -e "${CYAN}=== Franka ROS2 RL Training Setup ===${NC}"
@@ -185,16 +225,25 @@ cleanup() {
 
     echo -e "\n${YELLOW}Stopping training stack...${NC}"
 
-    # Stop nodes/processes inside container
-    pkill -SIGINT -f "ros_gz_bridge" 2>/dev/null || true
-    pkill -SIGINT -f "ros2 launch franka_gazebo_bringup" 2>/dev/null || true
-    pkill -SIGINT -f "ros2 run distance_based_rl train_agent" 2>/dev/null || true
-
-    # Stop host-side docker exec wrappers
-    [[ -n "${BRIDGE_PID:-}" ]] && kill "$BRIDGE_PID" 2>/dev/null || true
-    [[ -n "${LAUNCH_PID:-}" ]] && kill "$LAUNCH_PID" 2>/dev/null || true
+    # Kill only the processes THIS invocation started, by PID — never a global
+    # pkill on the process name.  Several of these scripts may run concurrently on
+    # different ROS_DOMAIN_IDs (see scripts/run_experiments.sh), and a name-matching
+    # pkill would tear down the other runs' simulations too.
+    local pid
+    for pid in "${LAUNCH_PID:-}" "${BRIDGE_PID:-}"; do
+        [[ -z "$pid" ]] && continue
+        # SIGINT the children first (ros2 launch forwards it to gzserver, the
+        # controller spawners and the bridge), then the process itself.
+        pkill -SIGINT -P "$pid" 2>/dev/null || true
+        kill -SIGINT "$pid" 2>/dev/null || true
+    done
 
     sleep 2
+
+    for pid in "${LAUNCH_PID:-}" "${BRIDGE_PID:-}"; do
+        [[ -z "$pid" ]] && continue
+        kill -SIGKILL "$pid" 2>/dev/null || true
+    done
 
     echo -e "${GREEN}Cleanup complete.${NC}"
 }
@@ -271,36 +320,59 @@ TRAIN_ENV=(
     FRANKA_ROBOT_STATE_TOPIC="$ROBOT_STATE_TOPIC"
     FRANKA_STATE_WAIT_TIMEOUT_SEC="$STATE_WAIT_TIMEOUT_SEC"
     FRANKA_STATE_WAIT_POLL_SEC="$STATE_WAIT_POLL_SEC"
+    MAX_STEPS_PER_EPISODE="$MAX_STEPS"
 )
 
 if [[ "$CUDA_MODE" == "off" ]]; then
     TRAIN_ENV+=(CUDA_VISIBLE_DEVICES="")
 fi
 
-TRAIN_CMD=(
-    "${TRAIN_ENV[@]}" ros2 run distance_based_rl train_agent
-    --num-episodes "$NUM_EPISODES"
-    --max-steps "$MAX_STEPS"
-    --batch-size "$BATCH_SIZE"
-    --learning-rate "$LEARNING_RATE"
-    --buffer-size "$BUFFER_SIZE"
-    --hidden-dim "$HIDDEN_DIM"
-    --output-dir "$OUTPUT_DIR"
-    --checkpoint-interval "$CHECKPOINT_INTERVAL"
-    --gradient-steps "$GRADIENT_STEPS"
-)
+if [[ "$AGENT" == "sb3" ]]; then
+    # Stable-Baselines3 cross-check: same env, same hyperparameters, same step budget.
+    TRAIN_CMD=(
+        "${TRAIN_ENV[@]}" python3 "$WORKDIR/scripts/sb3_baseline.py"
+        --total-steps "$BASELINE_STEPS"
+        --max-steps "$MAX_STEPS"
+        --batch-size "$BATCH_SIZE"
+        --learning-rate "$LEARNING_RATE"
+        --buffer-size "$BUFFER_SIZE"
+        --hidden-dim "$HIDDEN_DIM"
+        --gradient-steps "$GRADIENT_STEPS"
+        --output-dir "$OUTPUT_DIR"
+    )
+    if [[ -n "$SEED" ]]; then
+        TRAIN_CMD+=(--seed "$SEED")
+    fi
+else
+    TRAIN_CMD=(
+        "${TRAIN_ENV[@]}" ros2 run distance_based_rl train_agent
+        --num-episodes "$NUM_EPISODES"
+        --max-steps "$MAX_STEPS"
+        --batch-size "$BATCH_SIZE"
+        --learning-rate "$LEARNING_RATE"
+        --buffer-size "$BUFFER_SIZE"
+        --hidden-dim "$HIDDEN_DIM"
+        --output-dir "$OUTPUT_DIR"
+        --checkpoint-interval "$CHECKPOINT_INTERVAL"
+        --gradient-steps "$GRADIENT_STEPS"
+        --warmup-steps "$WARMUP_STEPS"
+    )
 
-if [[ "$NO_TENSORBOARD" == "true" ]]; then
-    TRAIN_CMD+=(--no-tensorboard)
-fi
-if [[ -n "$LOAD_MODEL" ]]; then
-    TRAIN_CMD+=(--load-model "$LOAD_MODEL")
-fi
-if [[ -n "$CONFIG_PATH" ]]; then
-    TRAIN_CMD+=(--config "$CONFIG_PATH")
-fi
+    if [[ "$NO_TENSORBOARD" == "true" ]]; then
+        TRAIN_CMD+=(--no-tensorboard)
+    fi
+    if [[ -n "$LOAD_MODEL" ]]; then
+        TRAIN_CMD+=(--load-model "$LOAD_MODEL")
+    fi
+    if [[ -n "$CONFIG_PATH" ]]; then
+        TRAIN_CMD+=(--config "$CONFIG_PATH")
+    fi
+    if [[ -n "$SEED" ]]; then
+        TRAIN_CMD+=(--seed "$SEED")
+    fi
 
-require_ros_executable "distance_based_rl" "train_agent"
+    require_ros_executable "distance_based_rl" "train_agent"
+fi
 
 echo -e "${CYAN}4. Starting training...${NC}"
 echo -e "${GREEN}Press Ctrl+C to stop training and cleanup.${NC}"

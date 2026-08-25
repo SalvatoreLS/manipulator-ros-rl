@@ -1,0 +1,31 @@
+# Third-party ROS 2 sources this workspace builds against.
+#
+# These are upstream packages, not part of this project's contribution — they used to be
+# committed in-tree, which buried the ~1.5k lines that are actually mine.  Fetch them with:
+#
+#     vcs import src < src/deps.repos
+#
+# Versions match what the workspace was developed and tested against: franka_ros2 2.3.0
+# and the pins from its own dependency.repos.
+repositories:
+  franka_ros2:
+    type: git
+    url: https://github.com/frankarobotics/franka_ros2.git
+    version: v2.3.0
+  franka_description:
+    type: git
+    url: https://github.com/frankarobotics/franka_description.git
+    version: 1.6.1
+  # libfranka carries a git submodule (libfranka-common); vcstool does not fetch
+  # submodules, so after importing run:
+  #     git -C src/libfranka submodule update --init --recursive
+  libfranka:
+    type: git
+    url: https://github.com/frankarobotics/libfranka.git
+    version: 0.20.4
+  # Upstream publishes no tags for this one; franka_ros2's own dependency.repos tracks
+  # main as well.  Only the URDF/mesh descriptions are used here.
+  olvx_descriptions_module:
+    type: git
+    url: https://github.com/olive-robotics/olvx_descriptions_module.git
+    version: main

@@ -19,22 +19,40 @@ class TrainingConfig:
         self.checkpoint_interval = kwargs.get('checkpoint_interval', 50)
         self.use_tensorboard = kwargs.get('use_tensorboard', True)
         # Number of gradient updates to perform per environment step.
-        # The ROS2/Gazebo step blocks for ~50-100 ms while GPU updates take ~1 ms,
-        # so a UTD ratio > 1 is needed to saturate the GPU.
-        self.gradient_steps = kwargs.get('gradient_steps', 10)
+        # Each optimize() call costs ~7-8 ms of Python dispatch overhead on top of
+        # actual GPU compute (~1 ms).  The env.step() blocks for ~50 ms (ROS2 sleep),
+        # which is the async window available for gradient work.  Keeping
+        # gradient_steps * ~8 ms ≤ 50 ms ensures updates finish before the next
+        # action selection — eliminating the per-step wait entirely.
+        # On this hardware: 6 × 8 ms = 48 ms < 50 ms (fits with a small margin).
+        # Increase if env.step() is slower (e.g. --state-wait-timeout > 5 s).
+        self.gradient_steps = kwargs.get('gradient_steps', 6)
+        # Number of initial environment steps that use uniformly random actions before the
+        # policy takes over. Seeds the replay buffer with diverse transitions and avoids
+        # early policy collapse — standard SAC warm-up.
+        self.warmup_steps = kwargs.get('warmup_steps', 1000)
+        # Master seed for the run: seeds torch, numpy, the action space and the
+        # environment's target sampler. None means "not reproducible".
+        self.seed = kwargs.get('seed', None)
 
     def save(self, path):
         """Save configuration to JSON file."""
-        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+        dirname = os.path.dirname(path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
         config_dict = {
-            'num_episodes': self.num_episodes,
+            'num_episodes':          self.num_episodes,
             'max_steps_per_episode': self.max_steps_per_episode,
-            'batch_size': self.batch_size,
-            'learning_rate': self.learning_rate,
-            'buffer_size': self.buffer_size,
-            'hidden_dim': self.hidden_dim,
-            'checkpoint_interval': self.checkpoint_interval,
-            'gradient_steps': self.gradient_steps,
+            'batch_size':            self.batch_size,
+            'learning_rate':         self.learning_rate,
+            'buffer_size':           self.buffer_size,
+            'hidden_dim':            self.hidden_dim,
+            'output_dir':            self.output_dir,
+            'checkpoint_interval':   self.checkpoint_interval,
+            'use_tensorboard':       self.use_tensorboard,
+            'gradient_steps':        self.gradient_steps,
+            'warmup_steps':          self.warmup_steps,
+            'seed':                  self.seed,
         }
         with open(path, 'w') as f:
             json.dump(config_dict, f, indent=2)

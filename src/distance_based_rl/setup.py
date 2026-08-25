@@ -13,9 +13,10 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='root',
+    maintainer='Salvatore Lo Sardo',
     maintainer_email='losardosalvatorejr@gmail.com',
-    description='Package for training a reinforcement learning agent using distance-based rewards in a simulated ROS2 environment.',
+    description='Gymnasium environment and from-scratch SAC agent for distance-based '
+                'manipulator control in ROS2 / Gazebo.',
     license='Apache 2.0',
     extras_require={
         'test': [
@@ -25,6 +26,7 @@ setup(
     entry_points={
         'console_scripts': [
             'train_agent = distance_based_rl.agent.train:main',
+            'eval_agent = distance_based_rl.agent.eval:main',
         ],
     },
 )

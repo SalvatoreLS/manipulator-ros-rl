@@ -37,6 +37,13 @@ RUN apt-get update && apt-get install -y \
     ros-humble-joint-trajectory-controller \
     && rm -rf /var/lib/apt/lists/*
 
+# The base image ships setuptools 84 from pip alongside apt's python3-packaging 21.3.
+# setuptools >= 71 calls packaging.canonicalize_version(strip_trailing_zero=...), which
+# only exists from packaging 24, so every `colcon build` of a python package dies with
+# "canonicalize_version() got an unexpected keyword argument 'strip_trailing_zero'".
+# Upgrading packaging (rather than downgrading setuptools) keeps colcon working.
+RUN pip3 install "packaging>=24.0"
+
 # Install PyTorch for CUDA 12.8 explicitly before other packages so that
 # stable-baselines3 does not pull in a newer wheel compiled for CUDA 13.0+
 # (which exceeds what the host NVIDIA driver supports).

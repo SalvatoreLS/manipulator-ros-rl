@@ -12,14 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
+
 from ament_flake8.main import main_with_errors
 import pytest
+
+# ament_flake8 ships its own configuration and ignores setup.cfg unless pointed at it.
+# The package's deviations from the ament defaults are documented in that file.
+CONFIG = Path(__file__).resolve().parent.parent / 'setup.cfg'
 
 
 @pytest.mark.flake8
 @pytest.mark.linter
 def test_flake8():
-    rc, errors = main_with_errors(argv=[])
+    rc, errors = main_with_errors(argv=['--config', str(CONFIG)])
     assert rc == 0, \
         'Found %d code style errors / warnings:\n' % len(errors) + \
         '\n'.join(errors)

@@ -1,0 +1,24 @@
+# The workspace is bind-mounted at /ros2_rl_ws by docker-compose, and the image only
+# COPYs entrypoint.sh.  Everything else here is build context that would be uploaded to
+# the daemon on every build for nothing.
+
+.git/
+.github/
+
+# colcon artefacts (regenerated inside the container)
+build/
+install/
+log/
+
+# Training artefacts
+output/
+**/*.pt
+**/events.out.tfevents.*
+
+# Editor / tooling state
+.claude/
+.vscode/
+.idea/
+tmp_files/
+**/__pycache__/
+*.py[cod]
